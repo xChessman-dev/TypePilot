@@ -57,6 +57,13 @@ internal static class SmokeChecks
             if (vm.Editor != "Привет, ") throw new Exception("Typography failed: " + vm.Editor);
             window.SmokeUndo();
             if (vm.Editor != "привет , ") throw new Exception("Typography undo failed.");
+            window.SmokeSetEditor("еслияпишусловаслитно ");
+            window.SmokeContext("Если я пишу слова слитно.");
+            if (window.SmokeCaret != vm.Editor.Length) throw new Exception("Longer context result left the editor caret inside the sentence.");
+            window.SmokeInsert("сегодня");
+            // SelectedText simulates insertion at the caret, but unlike physical input
+            // the WPF setter may keep the inserted text selected. Check its location.
+            if (vm.Editor != "Если я пишу слова слитно. сегодня") throw new Exception("Typing after context result did not append at the preserved caret: " + vm.Editor);
             window.SmokeSetEditor("Привет! Это локальный помощник набора.\n\nПишу сообщение без спешки: TypePilot поправляет опечатки, предлагает слова и помогает выразить мысль яснее.");
             vm.Status = "Готов к набору · всё остаётся на компьютере";
             vm.Result = "Пример интерфейса. Реальная генерация проверяется отдельно через --ai-smoke.";
@@ -89,7 +96,7 @@ internal static class SmokeChecks
             suggestionsWindow.Highlight(1);
             await window.Dispatcher.InvokeAsync(() => Capture(suggestionsWindow, "floating-t9"), DispatcherPriority.ApplicationIdle);
             suggestionsWindow.Close();
-            await File.WriteAllTextAsync(Path.Combine(OutputDir, "ui-check.json"), JsonSerializer.Serialize(new { passed = true, correction = true, undo = true, personalDictionary = true, nativeEditContract = true, externalAppsEndToEnd = false, windowsDictionary = spelling.Status, windowsSuggestions = suggestions.Select(s => s.Word) }));
+            await File.WriteAllTextAsync(Path.Combine(OutputDir, "ui-check.json"), JsonSerializer.Serialize(new { passed = true, correction = true, undo = true, personalDictionary = true, editorContextCaret = true, continuedTyping = true, nativeEditContract = true, externalAppsEndToEnd = false, windowsDictionary = spelling.Status, windowsSuggestions = suggestions.Select(s => s.Word) }));
             window.Close();
         }
         catch (Exception ex)

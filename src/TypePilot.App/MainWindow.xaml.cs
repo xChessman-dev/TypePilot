@@ -242,9 +242,12 @@ public partial class MainWindow : Window
         try
         {
             EditorBox.BeginChange();
-            try { EditorBox.Select(start, length); EditorBox.SelectedText = replacement; EditorBox.CaretIndex = Math.Clamp(caret, 0, EditorBox.Text.Length); }
+            try { EditorBox.Select(start, length); EditorBox.SelectedText = replacement; }
             finally { EditorBox.EndChange(); }
             _vm.Editor = EditorBox.Text;
+            // TextBox.Text is updated at EndChange. Clamping before it used the old
+            // length and placed the caret inside a longer corrected sentence.
+            EditorBox.CaretIndex = Math.Clamp(caret, 0, EditorBox.Text.Length);
         }
         finally { _editing = false; }
     }
@@ -317,4 +320,12 @@ public partial class MainWindow : Window
     }
     internal void SmokeSetStyle(int index) => StyleBox.SelectedIndex = index;
     internal void SmokeScroll(double offset) { PageScroll.ScrollToVerticalOffset(offset); UpdateLayout(); }
+    internal int SmokeCaret => EditorBox.CaretIndex;
+    internal void SmokeContext(string result)
+    {
+        var phrase = ContextTyping.Capture(EditorBox.Text, EditorBox.CaretIndex)!;
+        var edit = ContextTyping.Apply(EditorBox.Text, phrase, result)!;
+        ReplaceEditorRange(edit.Start, edit.Original.Length, edit.Replacement, edit.Caret);
+    }
+    internal void SmokeInsert(string text) => EditorBox.SelectedText = text;
 }

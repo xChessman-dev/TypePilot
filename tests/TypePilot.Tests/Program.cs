@@ -29,6 +29,16 @@ Checks.Equal("привет ", engine.CorrectAtBoundary("ghbdtn ", 7)!.After, "La
 engine.SetPersonal(["превет", "Микпилот"]);
 Checks.True(engine.Suggest("превет").Count == 0, "Personal words override autocorrect");
 Checks.True(engine.IsKnown("микпилот"), "Personal dictionary ignores case");
+Checks.True(engine.CorrectAtBoundary("foo@превет ", 11) is null, "Email suffix is untouched");
+Checks.True(engine.CorrectAtBoundary("my_превет ", 10) is null, "Code identifier suffix is untouched");
+Checks.Equal("Ещё", TextEngine.MatchCase("Еше", "ещё"), "Cyrillic ё case");
+Checks.Throws<ArgumentOutOfRangeException>(() => TextEngine.Replace("text", -1, 1, "a", 1), "Negative edit range refused");
+Checks.Throws<ArgumentOutOfRangeException>(() => TextEngine.Replace("text", 1, 8, "a", 1), "Out of range edit refused");
+Checks.True(RewriteGuard.MissingDetails("завтра в 18:30", "В 18:30").Contains("завтра"), "Temporal detail guard");
+Checks.True(RewriteGuard.MissingDetails("завтра в 18:30", "Завтра в 19:30").Contains("18:30"), "Time detail guard");
+Checks.True(RewriteGuard.MissingDetails("цена 2", "цена 20").Contains("2"), "Number matching is exact");
+Checks.True(RewriteGuard.MissingDetails("ссылка https://example.com/test", "ссылка https://example.com/other").Count == 1, "Link detail guard");
+Checks.True(RewriteGuard.MissingDetails("Вчера в 18:30", "ВЧЕРА в 18:30").Count == 0, "Guard ignores marker case");
 Checks.Throws<InvalidDataException>(() => SettingsStore.ParseDictionary("hello\n@secret"), "Invalid import is atomic");
 Checks.Equal(2, SettingsStore.ParseDictionary("hello\nHello\nПривет\n").Count, "Import deduplication");
 Checks.True(!FieldPolicy.Allows(new("notepad", true, true, true, true), ["notepad"]), "Passwords refused");

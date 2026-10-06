@@ -25,6 +25,10 @@ internal static class FieldIntegrationCheck
             window.Show(); window.Activate(); box.Focus(); box.Select(7, 0);
             await Task.Delay(200, timeout.Token);
             var fixtureHandle = new System.Windows.Interop.WindowInteropHelper(window).Handle;
+            // Windows may deny a background process foreground activation. Give an interactive
+            // runner time to activate this owned fixture; never inspect any other window's field.
+            for (var attempt = 0; attempt < 200 && NativeMethods.GetForegroundWindow() != fixtureHandle; attempt++)
+                await Task.Delay(100, timeout.Token);
             if (NativeMethods.GetForegroundWindow() != fixtureHandle)
             {
                 await File.WriteAllTextAsync(Path.Combine(output, "field-check.json"), JsonSerializer.Serialize(new { passed = false, skipped = true, reason = "Windows did not allow fixture activation. No other field was read or changed.", fixtureOnly = true }));
@@ -41,6 +45,16 @@ internal static class FieldIntegrationCheck
             Require(after.Identity == original.Identity, "Undo is restricted to the same fixture field");
             Require(await fields.ReplaceAsync(after, 0, 6, "превет", 7, ["TypePilot"], false, timeout.Token), "UIA undo input");
             await Task.Delay(100, timeout.Token); Require(box.Text == "превет ", "UIA undo");
+            box.Text = "Привет , "; box.CaretIndex = box.Text.Length;
+            var typographySource = (await fields.ReadAsync(["TypePilot"], true, fixtureHandle))!;
+            var typography = SmartTyping.Edit(vm.Engine, typographySource.Text, typographySource.End, vm.Settings)!;
+            Require(await fields.ReplaceAsync(typographySource, typography.Start, typography.Original.Length, typography.Replacement, typography.Caret, ["TypePilot"], false, timeout.Token), "UIA punctuation correction");
+            await Task.Delay(100, timeout.Token); Require(box.Text == "Привет, ", "UIA punctuation range");
+            var typographyAfter = (await fields.ReadAsync(["TypePilot"], true, fixtureHandle))!;
+            Require(await fields.ReplaceAsync(typographyAfter, typography.Start, typography.Replacement.Length, typography.Original, typographySource.End, ["TypePilot"], false, timeout.Token), "UIA punctuation undo");
+            await Task.Delay(100, timeout.Token); Require(box.Text == "Привет , ", "UIA punctuation undo preserves original");
+            using (var keys = new SuggestionKeys(app.Dispatcher, () => { }, () => { }, () => { }))
+                Require(keys.Start((await fields.ReadAsync(["TypePilot"], true, fixtureHandle))!), "Optional Tab/focus hooks install and unload in owned fixture");
             var stale = (await fields.ReadAsync(["TypePilot"], true, fixtureHandle))!;
             box.Text = "Новое сообщение"; box.CaretIndex = box.Text.Length;
             Require(!await fields.ReplaceAsync(stale, 0, 6, "НЕ ВСТАВЛЯТЬ", 7, ["TypePilot"], false, timeout.Token), "Stale source refused");
@@ -70,7 +84,7 @@ internal static class FieldIntegrationCheck
             box.Text = "Пользователь изменил исходник";
             Require(!await staleQuick.ApplyAsync(), "Quick rewrite stale result refused");
             Require(box.Text == "Пользователь изменил исходник", "Changed source kept intact"); staleQuick.Close();
-            await File.WriteAllTextAsync(Path.Combine(output, "field-check.json"), JsonSerializer.Serialize(new { passed = true, uiaRead = true, uiaWrite = true, undo = true, caret = true, noFocusSteal = true, passwordsRefused = true, staleRefused = true, selectedRangeApply = true, fixtureOnly = true, browserEndToEnd = false }));
+            await File.WriteAllTextAsync(Path.Combine(output, "field-check.json"), JsonSerializer.Serialize(new { passed = true, uiaRead = true, uiaWrite = true, undo = true, typographyUndo = true, tabHookInstallation = true, caret = true, noFocusSteal = true, passwordsRefused = true, staleRefused = true, selectedRangeApply = true, fixtureOnly = true, browserEndToEnd = false }));
             window.Close(); app.Shutdown();
         }
         catch (Exception ex)

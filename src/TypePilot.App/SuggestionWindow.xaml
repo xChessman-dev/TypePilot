@@ -3,7 +3,8 @@
     <StackPanel>
       <Grid Margin="4,0,0,8"><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="TYPEPILOT · ПОДСКАЗКИ" Foreground="{StaticResource Accent}" FontSize="11" FontWeight="SemiBold"/><Button Grid.Column="1" Content="×" Click="DismissClick" Padding="4,0" MinHeight="24" MinWidth="24" Background="Transparent" BorderBrush="Transparent" AutomationProperties.Name="Скрыть подсказки"/></Grid>
       <StackPanel x:Name="Choices" Orientation="Horizontal"/>
-      <TextBlock Text="Ctrl+Alt+1 / 2 / 3 — принять · поле сохраняет фокус" Style="{StaticResource Hint}" FontSize="11" Margin="4,8,0,0"/>
+      <Button x:Name="KeepOriginal" Click="DismissClick" Content="Оставить как есть" HorizontalAlignment="Left" Padding="8,4" MinHeight="28" Background="Transparent" BorderBrush="Transparent" Foreground="{StaticResource Muted}" Margin="0,8,0,0" Focusable="False"/>
+      <TextBlock x:Name="SelectionHint" Text="Tab → 1 / 2 / 3 · Escape — оставить · Ctrl+Alt+цифра — сразу" Style="{StaticResource Hint}" FontSize="11" Margin="4,4,0,0"/>
     </StackPanel>
   </Border>
 </Window>

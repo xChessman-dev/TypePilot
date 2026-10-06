@@ -47,6 +47,16 @@ internal static class SmokeChecks
             vm.Engine.SetPersonal([]);
             using var spelling = new WindowsSpelling();
             var suggestions = spelling.Suggest("компютер");
+            foreach (var valid in new[] { "думать", "обсуждать", "hello" })
+            {
+                var check = spelling.Analyze(valid);
+                if (check.State == SpellingState.Misspelled || check.Suggestions.Count != 0) throw new Exception("Correct word was offered replacements: " + valid);
+            }
+            if (spelling.Analyze("компютер").State == SpellingState.Correct) throw new Exception("Misspelling was declared correct.");
+            window.SmokeSetEditor("привет , "); window.SmokeCorrectBoundary();
+            if (vm.Editor != "Привет, ") throw new Exception("Typography failed: " + vm.Editor);
+            window.SmokeUndo();
+            if (vm.Editor != "привет , ") throw new Exception("Typography undo failed.");
             window.SmokeSetEditor("Привет! Это локальный помощник набора.\n\nПишу сообщение без спешки: TypePilot поправляет опечатки, предлагает слова и помогает выразить мысль яснее.");
             vm.Status = "Готов к набору · всё остаётся на компьютере";
             vm.Result = "Пример интерфейса. Реальная генерация проверяется отдельно через --ai-smoke.";
@@ -75,6 +85,7 @@ internal static class SmokeChecks
             quick.Close();
             var suggestionsWindow = new SuggestionWindow(_ => { }, () => { });
             suggestionsWindow.Present(new(previewField, new(0, 6, "превет", false), [new("привет", "Опечатка"), new("приветы", "Словарь Windows"), new("приветствие", "Продолжение")]));
+            suggestionsWindow.Highlight(1);
             await window.Dispatcher.InvokeAsync(() => Capture(suggestionsWindow, "floating-t9"), DispatcherPriority.ApplicationIdle);
             suggestionsWindow.Close();
             await File.WriteAllTextAsync(Path.Combine(OutputDir, "ui-check.json"), JsonSerializer.Serialize(new { passed = true, correction = true, undo = true, personalDictionary = true, nativeEditContract = true, externalAppsEndToEnd = false, windowsDictionary = spelling.Status, windowsSuggestions = suggestions.Select(s => s.Word) }));

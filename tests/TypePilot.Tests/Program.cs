@@ -4,7 +4,56 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 
+try
+{
 var engine = DefaultEngine.Create();
+var smartSettings = new PilotSettings();
+foreach (var (before, expected) in new[] {
+    ("привет ", "Привет "), ("я дома ", "Я дома "), ("привет мир ", "Привет мир "),
+    ("Привет! как дела ", "Привет! Как дела "), ("Привет. как дела ", "Привет. Как дела "),
+    ("Привет\nкак дела ", "Привет\nКак дела "), ("«привет» ", "«Привет» "),
+    ("превет ", "Привет "), ("привет , ", "Привет, "), ("Привет,как дела ", "Привет, как дела "),
+    ("привет  ", "Привет. "), ("Привет!  ", "Привет!  ") })
+    Checks.Equal(expected, SmartTyping.Edit(engine, before, before.Length, smartSettings)?.After ?? before, "Smart typing: " + before);
+foreach (var text in new[] { "https://example.com  ", "user@example.com  ", "foo_bar  ", "18:30  ", "1.5  ", "@привет ", "#привет ", "C:\\привет  ", "http://превет ", "  ", "привет" })
+    Checks.True(SmartTyping.Edit(engine, text, text.Length, smartSettings) is null, "Protected token: " + text);
+Checks.True(SmartTyping.Edit(engine, "Привет  мир", 8, smartSettings) is null, "Double-space inside a draft is untouched");
+Checks.True(SmartTyping.Edit(engine, "привет ", 7, new() { AutoCapitalize = false }) is null, "Capitalization toggle");
+Checks.True(SmartTyping.Edit(engine, "Привет  ", 8, new() { DoubleSpacePeriod = false }) is null, "Double-space toggle");
+Checks.True(SmartTyping.Edit(engine, "Привет , ", 9, new() { SmartPunctuation = false }) is null, "Spacing toggle");
+Checks.True(SmartTyping.Edit(engine, "Привет, тут г. москва ", 21, smartSettings) is null, "Abbreviation doesn't start a sentence");
+var capitalizeEdit = SmartTyping.Edit(engine, "привет  ", 8, smartSettings)!;
+Checks.True(TextEngine.TryUndo(capitalizeEdit, capitalizeEdit.After, out var originalSmart) && originalSmart == "привет  ", "Combined typography undo");
+foreach (var text in new[] { "Привет , ", "Привет,как " })
+{
+    var spacingEdit = SmartTyping.Edit(engine, text, text.Length, smartSettings)!;
+    Checks.True(spacingEdit.Original.Length > 0 && spacingEdit.Replacement.Length > 0, "Typography and undo use nonempty UIA input");
+    Checks.Equal(spacingEdit.After, TextEngine.Replace(text, spacingEdit.Start, spacingEdit.Original.Length, spacingEdit.Replacement, spacingEdit.Caret - spacingEdit.Replacement.Length + spacingEdit.Original.Length).After, "Typography minimal-range contract");
+}
+Checks.True(SuggestionPolicy.Build(engine, new(0, 6, "думать", false), true, _ => throw new Exception("Unneeded check")).Count == 0, "Known complete word has no noisy completions");
+Checks.True(SuggestionPolicy.Build(engine, new(0, 3, "мяу", false), true, _ => throw new Exception("Unneeded check")).Count == 0, "Meow stays meow");
+Checks.True(SuggestionPolicy.Build(engine, new(0, 9, "обсуждать", false), true, _ => new(SpellingState.Correct, [new("обсуждают", "fake")])).Count == 0, "Windows-valid word suppresses fuzzy suggestions");
+Checks.True(SuggestionPolicy.Build(engine, new(0, 2, "хз", true), true, _ => new(SpellingState.Misspelled, [new("он", "fake")])).Count == 0, "Short slang has no replacements");
+Checks.True(SuggestionPolicy.Build(engine, new(0, 7, "мирофон", true), true, _ => SpellingResult.Unavailable).Count == 0, "Unavailable dictionary doesn't invent corrections");
+Checks.Equal("микрофон", SuggestionPolicy.Build(engine, new(0, 7, "мирофон", true), true, _ => new(SpellingState.Misspelled, [new("микрофон", "Windows")]))[0].Word, "Confirmed spelling suggestions are prioritized");
+var tab = new TabSelection();
+Checks.Equal(0, tab.Next(3), "First Tab selects option 1");
+Checks.Equal(1, tab.Next(3), "Second Tab selects option 2");
+Checks.Equal(2, tab.Next(3), "Third Tab selects option 3");
+Checks.Equal(0, tab.Next(3), "Fourth Tab wraps");
+tab.Reset(); Checks.Equal(0, tab.Next(2), "New offer resets Tab");
+Checks.Equal(-1, tab.Next(0), "No offer means no Tab interception");
+var keys = new SuggestionKeyPolicy();
+Checks.True(!keys.Route(9, true, false, false, false, true).Consume, "Tab outside target window passes through");
+Checks.True(!keys.Route(9, true, false, false, true, false).Consume, "Shift/Control/Alt+Tab passes through");
+Checks.True(!keys.Route(9, true, false, true, true, true).Consume, "Injected Tab passes through");
+Checks.Equal(new SuggestionKeyDecision(true, SuggestionKeyAction.Next), keys.Route(9, true, false, false, true, true), "Physical Tab selects a choice");
+Checks.Equal(new SuggestionKeyDecision(true, SuggestionKeyAction.None), keys.Route(9, true, false, false, true, true), "Held Tab doesn't advance repeatedly");
+Checks.True(keys.Route(9, false, true, false, true, true).Consume, "Consumed Tab has a matching key-up");
+Checks.Equal(SuggestionKeyAction.Next, keys.Route(9, true, false, false, true, true).Action, "Released and pressed Tab advances again");
+Checks.Equal(new SuggestionKeyDecision(false, SuggestionKeyAction.CancelPending), keys.Route(65, true, false, false, true, true), "Typing cancels deferred selection without swallowing input");
+Checks.Equal(new SuggestionKeyDecision(true, SuggestionKeyAction.Dismiss), keys.Route(27, true, false, false, true, true), "Escape cancels an offer");
+keys.Reset(); Checks.True(!keys.Route(9, false, true, false, true, true).Consume, "Removing offer clears interception state");
 Checks.True(new PilotSettings().GlobalEnabled, "Background T9 enabled by default");
 Checks.Equal("прил", TypingContext.WordBeforeCaret("Пишу прил", 9, 9)!.Word, "Word at caret");
 Checks.True(TypingContext.WordBeforeCaret("foo@превет", 10, 10) is null, "Email token is not offered");
@@ -107,6 +156,12 @@ try
 }
 finally { if (File.Exists(temp)) File.Delete(temp); Directory.Delete(Path.GetDirectoryName(temp)!); }
 Console.WriteLine($"{Checks.Passed} checks passed.");
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine(ex);
+    Environment.ExitCode = 1;
+}
 
 sealed class FakeHandler : HttpMessageHandler
 {

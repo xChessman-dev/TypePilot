@@ -9,7 +9,7 @@ internal sealed class GlobalTyping : IDisposable
 {
     private readonly TextEngine _engine;
     private readonly Func<PilotSettings> _settings;
-    private readonly Func<string, IReadOnlyList<Suggestion>> _spelling;
+    private readonly Func<string, SpellingResult> _spelling;
     private readonly FieldAccess _fields = new();
     private readonly DispatcherTimer _poll;
     private readonly CancellationTokenSource _lifetime = new();
@@ -17,19 +17,21 @@ internal sealed class GlobalTyping : IDisposable
     private string _dismissed = "", _observed = "", _undoSuppressed = "";
     private FieldSnapshot? _lastAfter;
     private TextEdit? _lastEdit;
+    private FieldSnapshot? _previousField;
     public SuggestionOffer? CurrentOffer { get; private set; }
     public event Action<string>? StatusChanged;
     public event Action<SuggestionOffer?>? OfferChanged;
     public event Action? Corrected;
-    public GlobalTyping(TextEngine engine, Func<PilotSettings> settings, Dispatcher dispatcher, Func<string, IReadOnlyList<Suggestion>>? spelling = null)
+    public GlobalTyping(TextEngine engine, Func<PilotSettings> settings, Dispatcher dispatcher, Func<string, SpellingResult>? spelling = null)
     {
         _engine = engine; _settings = settings;
-        _spelling = spelling ?? (_ => []);
+        _spelling = spelling ?? (_ => SpellingResult.Unavailable);
         _poll = new DispatcherTimer(TimeSpan.FromMilliseconds(280), DispatcherPriority.Background, async (_, _) => await PollAsync(), dispatcher);
         _poll.Stop();
     }
     public void SetEnabled(bool enabled)
     {
+        _previousField = null; _observed = ""; HideOffer();
         if (enabled) _poll.Start(); else { _poll.Stop(); HideOffer(); }
         StatusChanged?.Invoke(enabled ? "Т9 в фоне · проверяемые поля Windows и браузера" : "Фоновый Т9 на паузе · горячая клавиша ИИ доступна");
     }
@@ -43,28 +45,30 @@ internal sealed class GlobalTyping : IDisposable
         {
             var field = await _fields.ReadAsync(Allowed).WaitAsync(TimeSpan.FromSeconds(2));
             if (_disposed || !_settings().GlobalEnabled) { HideOffer(); return; }
-            if (field is null) { _observed = ""; HideOffer(); return; }
+            if (field is null) { _observed = ""; _previousField = null; HideOffer(); return; }
             var fingerprint = Fingerprint(field);
+            var changedText = _previousField is { } previous && previous.Identity == field.Identity && previous.Foreground == field.Foreground && previous.Text != field.Text;
+            _previousField = field;
             if (_observed == fingerprint) return;
             _observed = fingerprint;
-            var word = TypingContext.WordBeforeCaret(field.Text, field.Start, field.End);
-            if (word is null || fingerprint == _undoSuppressed) { HideOffer(); return; }
-            if (_settings().AutoCorrect && word.AtBoundary && fingerprint != _dismissed)
+            if (fingerprint == _undoSuppressed) { HideOffer(); return; }
+            // Merely focusing an existing draft is not permission to rewrite it.
+            if (changedText && field.Start == field.End && fingerprint != _dismissed)
             {
-                var edit = _engine.CorrectAtBoundary(field.Text, field.End, _settings().FixLayout);
+                var edit = SmartTyping.Edit(_engine, field.Text, field.End, _settings());
                 if (edit is not null && NativeMethods.ModifiersReleased && await _fields.ReplaceAsync(field, edit.Start, edit.Original.Length, edit.Replacement, edit.Caret, Allowed, false, _lifetime.Token))
                 {
                     await Task.Delay(70, _lifetime.Token);
                     var after = await _fields.ReadAsync(Allowed);
                     if (after is not null && after.Identity == field.Identity && after.Text == edit.After) { _lastAfter = after; _lastEdit = edit; }
-                    StatusChanged?.Invoke("Опечатка исправлена · Ctrl+Alt+Backspace — отменить"); Corrected?.Invoke(); HideOffer(); return;
+                    StatusChanged?.Invoke("Текст поправлен · Ctrl+Alt+Backspace — отменить"); Corrected?.Invoke(); HideOffer(); return;
                 }
             }
+            var word = TypingContext.WordBeforeCaret(field.Text, field.Start, field.End);
+            if (word is null) { HideOffer(); return; }
             if (!_settings().ShowSuggestions || fingerprint == _dismissed) { HideOffer(); return; }
-            var items = _engine.Suggest(word.Word).Concat(_engine.IsKnown(word.Word) ? [] : _spelling(word.Word)).Concat(word.AtBoundary ? [] : _engine.Complete(word.Word))
-                .Where(s => _settings().FixLayout || s.Reason != "Другая раскладка")
-                .DistinctBy(s => s.Word.ToLowerInvariant()).Take(3).ToArray();
-            CurrentOffer = items.Length == 0 ? null : new(field, word, items);
+            var items = SuggestionPolicy.Build(_engine, word, _settings().FixLayout, _spelling);
+            CurrentOffer = items.Count == 0 ? null : new(field, word, items);
             OfferChanged?.Invoke(CurrentOffer);
         }
         catch (OperationCanceledException) { HideOffer(); }

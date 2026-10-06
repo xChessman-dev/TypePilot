@@ -328,3 +328,5 @@ simple
 clear
 short
 polite
+мяу
+думать

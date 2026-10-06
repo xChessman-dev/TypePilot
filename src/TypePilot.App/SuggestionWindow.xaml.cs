@@ -23,13 +23,27 @@ public partial class SuggestionWindow : Window
     internal void Present(SuggestionOffer offer)
     {
         Choices.Children.Clear();
+        KeepOriginal.Content = $"Оставить «{offer.Word.Word}»";
+        SelectionHint.Text = "Tab → 1 / 2 / 3 · Escape — оставить · Ctrl+Alt+цифра — сразу";
         for (var i = 0; i < offer.Items.Count; i++)
         {
             var index = i;
-            var button = new Button { Content = new TextBlock { Text = offer.Items[i].Word, MaxWidth = 156, TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis }, ToolTip = offer.Items[i].Word + " · " + offer.Items[i].Reason + $" · Ctrl+Alt+{i + 1}", Margin = new(0, 0, i < offer.Items.Count - 1 ? 8 : 0, 0), Padding = new(12, 8, 12, 8), Focusable = false };
+            var button = new Button { Content = new TextBlock { Text = $"{i + 1}  {offer.Items[i].Word}", MaxWidth = 156, TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis }, ToolTip = offer.Items[i].Word + " · " + offer.Items[i].Reason + $" · Ctrl+Alt+{i + 1}", Margin = new(0, 0, i < offer.Items.Count - 1 ? 8 : 0, 0), Padding = new(12, 8, 12, 8), Focusable = false };
             button.Click += (_, _) => _accept(index); Choices.Children.Add(button);
         }
         Show(); UpdateLayout(); FloatingPlacement.Near(this, offer.Field.Anchor);
+    }
+    internal void Highlight(int index, bool tabAvailable = true)
+    {
+        for (var i = 0; i < Choices.Children.Count; i++)
+        {
+            var button = (Button)Choices.Children[i];
+            button.SetResourceReference(BackgroundProperty, i == index ? "Hover" : "Input");
+            button.SetResourceReference(BorderBrushProperty, i == index ? "Accent" : "ControlLine");
+            System.Windows.Automation.AutomationProperties.SetName(button, ((TextBlock)button.Content).Text + (i == index ? " · выбрано" : ""));
+        }
+        SelectionHint.Text = index >= 0 ? $"Выбрано {index + 1} · пауза 0,6 с — принять · Tab — следующий · Escape — отменить" :
+            tabAvailable ? "Tab → 1 / 2 / 3 · Escape — оставить · Ctrl+Alt+цифра — сразу" : "Ctrl+Alt+1 / 2 / 3 — принять · или выбери мышью";
     }
     private void DismissClick(object sender, RoutedEventArgs e) => _dismiss();
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] private static extern IntPtr GetWindowLongPtr(IntPtr window, int index);

@@ -34,6 +34,10 @@ public sealed class PilotViewModel : INotifyPropertyChanged, IDisposable
     public bool FixLayout { get => Settings.FixLayout; set { Settings.FixLayout = value; Notify(); SettingsChanged?.Invoke(); } }
     public bool GlobalEnabled { get => Settings.GlobalEnabled; set { Settings.GlobalEnabled = value; Notify(); SettingsChanged?.Invoke(); } }
     public bool ShowSuggestions { get => Settings.ShowSuggestions; set { Settings.ShowSuggestions = value; Notify(); SettingsChanged?.Invoke(); } }
+    public bool AutoCapitalize { get => Settings.AutoCapitalize; set { Settings.AutoCapitalize = value; Notify(); SettingsChanged?.Invoke(); } }
+    public bool SmartPunctuation { get => Settings.SmartPunctuation; set { Settings.SmartPunctuation = value; Notify(); SettingsChanged?.Invoke(); } }
+    public bool DoubleSpacePeriod { get => Settings.DoubleSpacePeriod; set { Settings.DoubleSpacePeriod = value; Notify(); SettingsChanged?.Invoke(); } }
+    public bool TabSelection { get => Settings.TabSelection; set { Settings.TabSelection = value; Notify(); SettingsChanged?.Invoke(); } }
     public RewriteStyle Style { get; set; } = RewriteStyle.Clear;
     public string AiRoot { get => Settings.AiRoot; set { Settings.AiRoot = value; Notify(); } }
     public long AiMemoryMb => _ai.MemoryMb;
@@ -69,7 +73,7 @@ public sealed class PilotViewModel : INotifyPropertyChanged, IDisposable
         Engine.SetPersonal(Settings.PersonalWords);
         DictionaryText = string.Join(Environment.NewLine, Settings.PersonalWords);
         AllowedText = string.Join(Environment.NewLine, Settings.AllowedProcesses);
-        foreach (var property in new[] { nameof(AutoCorrect), nameof(FixLayout), nameof(GlobalEnabled), nameof(ShowSuggestions), nameof(AiRoot) }) Notify(property);
+        foreach (var property in new[] { nameof(AutoCorrect), nameof(FixLayout), nameof(GlobalEnabled), nameof(ShowSuggestions), nameof(AutoCapitalize), nameof(SmartPunctuation), nameof(DoubleSpacePeriod), nameof(TabSelection), nameof(AiRoot) }) Notify(property);
         AiStatus = AiRuntime.IsInstalled(Settings.AiRoot) ? "Qwen3 4B установлена · сейчас выгружена" : "Модель не установлена · Т9 готов без неё";
     }
     public async Task SaveAsync()

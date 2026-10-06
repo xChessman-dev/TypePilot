@@ -18,6 +18,11 @@ public partial class MainWindow : Window
     private readonly bool _smoke;
     private readonly bool _demo;
     private readonly DispatcherTimer _suggestTimer, _resourceTimer;
+    private readonly DispatcherTimer _globalTabTimer, _editorTabTimer;
+    private readonly TabSelection _globalTab = new(), _editorTab = new();
+    private readonly SuggestionKeys _suggestionKeys;
+    private string _editorOfferText = "";
+    private int _editorOfferCaret;
     private System.Windows.Forms.NotifyIcon? _tray;
     private System.Drawing.Icon? _icon;
     private HwndSource? _source;
@@ -37,7 +42,12 @@ public partial class MainWindow : Window
         _demo = demo;
         var settings = smoke ? Path.Combine(AppContext.BaseDirectory, "data", "smoke-settings.json") : Path.Combine(AppContext.BaseDirectory, "data", "settings.json");
         _vm = new(settings, new DispatcherSynchronizationContext(Dispatcher));
-        _global = new(_vm.Engine, () => _vm.Settings, Dispatcher, _spelling.Suggest);
+        _global = new(_vm.Engine, () => _vm.Settings, Dispatcher, _spelling.Analyze);
+        _suggestionKeys = new(Dispatcher, CycleGlobalTab, _global.Dismiss, CancelGlobalTab);
+        _globalTabTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(600), DispatcherPriority.Input, (_, _) =>
+        { var index = _globalTab.Index; CancelGlobalTab(); if (index >= 0) AcceptGlobal(index); }, Dispatcher); _globalTabTimer.Stop();
+        _editorTabTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(600), DispatcherPriority.Input, (_, _) =>
+        { var index = _editorTab.Index; CancelEditorTab(); if (index >= 0 && index < _vm.Suggestions.Count && EditorBox.IsKeyboardFocused && EditorBox.Text == _editorOfferText && EditorBox.CaretIndex == _editorOfferCaret) Accept(_vm.Suggestions[index]); }, Dispatcher); _editorTabTimer.Stop();
         _suggestTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(150), DispatcherPriority.Background, (_, _) => RefreshSuggestions(), Dispatcher); _suggestTimer.Stop();
         _resourceTimer = new DispatcherTimer(TimeSpan.FromSeconds(1), DispatcherPriority.Background, (_, _) => SampleResources(), Dispatcher); _resourceTimer.Stop();
         InitializeComponent();
@@ -91,13 +101,25 @@ public partial class MainWindow : Window
     }
     private void PresentSuggestions(SuggestionOffer? offer)
     {
+        CancelGlobalTab(); _suggestionKeys.Stop();
         for (var index = 0; index < 3; index++) NativeMethods.UnregisterHotKey(_handle, 11 + index);
         if (offer is null) { _suggestions?.Hide(); return; }
         _suggestions ??= new(AcceptGlobal, _global.Dismiss);
         _suggestions.Present(offer);
+        var tabAvailable = _vm.TabSelection && _suggestionKeys.Start(offer.Field);
+        _suggestions.Highlight(-1, tabAvailable);
         for (var index = 0; index < offer.Items.Count; index++)
             if (!NativeMethods.RegisterHotKey(_handle, 11 + index, 0x4003, (uint)(0x31 + index))) _vm.Status = $"Ctrl+Alt+{index + 1} занят · выбери подсказку мышью";
     }
+    private void CycleGlobalTab()
+    {
+        if (_global.CurrentOffer is not { } offer || !_vm.TabSelection) return;
+        var index = _globalTab.Next(offer.Items.Count);
+        _suggestions?.Highlight(index);
+        _globalTabTimer.Stop(); _globalTabTimer.Start();
+    }
+    private void CancelGlobalTab() { _globalTabTimer.Stop(); _globalTab.Reset(); _suggestions?.Highlight(-1, _vm.TabSelection); }
+    private void CancelEditorTab() { _editorTabTimer.Stop(); _editorTab.Reset(); }
     private async void AcceptGlobal(int index) { try { await _global.AcceptAsync(index); } catch (OperationCanceledException) { } }
     private async void UndoGlobal() { try { await _global.UndoAsync(); } catch (OperationCanceledException) { } }
     private void ShowWindow() { Show(); WindowState = WindowState.Normal; Activate(); }
@@ -116,8 +138,9 @@ public partial class MainWindow : Window
     private void EditorChanged(object sender, TextChangedEventArgs e)
     {
         if (_editing || EditorBox is null || _vm is null) return;
+        CancelEditorTab();
         _vm.Editor = EditorBox.Text;
-        var edit = _skipBoundary || !_vm.AutoCorrect ? null : _vm.Engine.CorrectAtBoundary(EditorBox.Text, EditorBox.CaretIndex, _vm.FixLayout);
+        var edit = _skipBoundary ? null : SmartTyping.Edit(_vm.Engine, EditorBox.Text, EditorBox.CaretIndex, _vm.Settings);
         _skipBoundary = false;
         if (edit is not null)
         {
@@ -128,36 +151,39 @@ public partial class MainWindow : Window
         UndoButton.IsEnabled = _lastEdit is not null;
         ScheduleSuggestions();
     }
-    private void EditorSelectionChanged(object sender, RoutedEventArgs e) { if (!_editing && _vm is not null) ScheduleSuggestions(); }
+    private void EditorSelectionChanged(object sender, RoutedEventArgs e) { if (!_editing && _vm is not null) { CancelEditorTab(); ScheduleSuggestions(); } }
     private void ScheduleSuggestions() { _suggestTimer.Stop(); _suggestTimer.Start(); }
     private void RefreshSuggestions()
     {
-        _suggestTimer.Stop(); _vm.Suggestions.Clear();
-        if (EditorBox.SelectionLength != 0) return;
+        _suggestTimer.Stop(); CancelEditorTab(); _vm.Suggestions.Clear();
+        if (EditorBox.SelectionLength != 0 || !_vm.ShowSuggestions) return;
         var text = EditorBox.Text; var end = EditorBox.CaretIndex;
-        // Suggestions target only the word immediately before the caret, not a stale token.
-        while (end > 0 && char.IsWhiteSpace(text[end - 1])) end--;
-        var start = end;
-        while (start > 0 && char.IsLetter(text[start - 1])) start--;
-        if (start == end || end - start > 48 || (start > 0 && (char.IsDigit(text[start - 1]) || "@/_-".Contains(text[start - 1])))) return;
-        _wordStart = start; _wordLength = end - start; _word = text[start..end];
-        var suggestions = _vm.Engine.Suggest(_word).Concat(_vm.Engine.IsKnown(_word) ? [] : _spelling.Suggest(_word)).Concat(_vm.Engine.Complete(_word));
-        foreach (var suggestion in suggestions.DistinctBy(s => s.Word.ToLowerInvariant()).Take(3)) _vm.Suggestions.Add(suggestion);
-        SuggestionHint.Text = _vm.Suggestions.Count == 0 ? "Нет уверенного исправления · слово оставлено как есть" : "Tab — первая подсказка. Неизвестные слова сами не заменяются.";
+        var word = TypingContext.WordBeforeCaret(text, end, end);
+        if (word is null) return;
+        _wordStart = word.Start; _wordLength = word.Length; _word = word.Word;
+        _editorOfferText = text; _editorOfferCaret = end;
+        foreach (var suggestion in SuggestionPolicy.Build(_vm.Engine, word, _vm.FixLayout, _spelling.Analyze)) _vm.Suggestions.Add(suggestion);
+        SuggestionHint.Text = _vm.Suggestions.Count == 0 ? "Слово оставлено как есть · исправление не требуется" : "Tab → 1 / 2 / 3 · пауза 0,6 с — принять · Escape — оставить";
     }
     private void EditorPreviewKeyDown(object sender, KeyEventArgs e)
     {
+        if (e.Key != Key.Tab || Keyboard.Modifiers != ModifierKeys.None) CancelEditorTab();
         if (e.Key == Key.Escape) { _suggestTimer.Stop(); _vm.Suggestions.Clear(); SuggestionHint.Text = "Подсказки скрыты · Tab перемещает фокус"; }
         if (e.Key == Key.Z && Keyboard.Modifiers.HasFlag(ModifierKeys.Control)) { _skipBoundary = true; _lastEdit = null; }
         if (e.Key == Key.Back && Keyboard.Modifiers == ModifierKeys.None && _lastEdit is not null && EditorBox.Text == _lastEdit.After && EditorBox.CaretIndex == _lastEdit.Caret)
         { UndoCorrection(this, new()); e.Handled = true; }
-        else if (e.Key == Key.Tab && Keyboard.Modifiers == ModifierKeys.None && _vm.Suggestions.Count > 0)
-        { Accept(_vm.Suggestions[0]); e.Handled = true; }
+        else if (e.Key == Key.Tab && Keyboard.Modifiers == ModifierKeys.None && _vm.TabSelection && _vm.Suggestions.Count > 0)
+        {
+            var index = _editorTab.Next(_vm.Suggestions.Count);
+            SuggestionHint.Text = $"Выбрано {index + 1}: {_vm.Suggestions[index].Word} · пауза 0,6 с — принять · Escape — отменить";
+            _editorTabTimer.Stop(); _editorTabTimer.Start(); e.Handled = true;
+        }
     }
     private void AcceptSuggestion(object sender, RoutedEventArgs e) { if ((sender as Button)?.Tag is Suggestion suggestion) Accept(suggestion); }
     private void Accept(Suggestion suggestion)
     {
-        if (_wordStart < 0 || _wordStart + _wordLength > EditorBox.Text.Length || EditorBox.Text.Substring(_wordStart, _wordLength) != _word) return;
+        CancelEditorTab();
+        if (EditorBox.Text != _editorOfferText || EditorBox.CaretIndex != _editorOfferCaret || _wordStart < 0 || _wordStart + _wordLength > EditorBox.Text.Length || EditorBox.Text.Substring(_wordStart, _wordLength) != _word) return;
         var edit = TextEngine.Replace(EditorBox.Text, _wordStart, _wordLength, suggestion.Word, EditorBox.CaretIndex);
         ReplaceEditorRange(edit.Start, edit.Original.Length, edit.Replacement, edit.Caret);
         _lastEdit = edit; UndoButton.IsEnabled = true; _vm.Corrections++; _vm.Status = "Подсказка принята · можно отменить";
@@ -230,7 +256,7 @@ public partial class MainWindow : Window
     private void WindowClosing(object? sender, CancelEventArgs e)
     {
         if (!_quit && !_smoke) { e.Cancel = true; Hide(); return; }
-        _suggestTimer.Stop(); _resourceTimer.Stop(); _global.Dispose(); _quickRewrite?.Close(); _vm.Dispose(); _spelling.Dispose();
+        _suggestTimer.Stop(); _resourceTimer.Stop(); _globalTabTimer.Stop(); _editorTabTimer.Stop(); _suggestionKeys.Dispose(); _global.Dispose(); _quickRewrite?.Close(); _vm.Dispose(); _spelling.Dispose();
         _source?.RemoveHook(WindowMessage); NativeMethods.UnregisterHotKey(_handle, 1); NativeMethods.UnregisterHotKey(_handle, 2);
         _tray?.Dispose(); _icon?.Dispose();
         _suggestions?.Close(); _quickRewrite?.Close();
@@ -239,6 +265,7 @@ public partial class MainWindow : Window
     internal void SmokeSetEditor(string text) => ApplyEditorText(text);
     internal void SmokeCorrectBoundary()
     {
+        EditorBox.CaretIndex = EditorBox.Text.Length;
         _skipBoundary = false;
         EditorChanged(EditorBox, new TextChangedEventArgs(TextBox.TextChangedEvent, UndoAction.None));
     }

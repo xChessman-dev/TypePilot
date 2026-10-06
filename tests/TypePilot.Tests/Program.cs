@@ -8,6 +8,31 @@ try
 {
 var engine = DefaultEngine.Create();
 var smartSettings = new PilotSettings();
+var prefixEdit = SmartTyping.Edit(engine, "привет как дела ", 16, smartSettings)!;
+var naturalPrefix = TypingEdits.NaturalCaret(prefixEdit, 16)!;
+Checks.Equal("Привет как дела ", naturalPrefix.Replacement, "Capitalization includes unchanged tail to caret");
+Checks.Equal(naturalPrefix.Caret, naturalPrefix.Start + naturalPrefix.Replacement.Length, "Literal input naturally ends at the original caret");
+var middleEdit = TypingEdits.Difference("привет | хвост", "Привет | хвост", 7)!;
+var naturalMiddle = TypingEdits.NaturalCaret(middleEdit, 7)!;
+Checks.Equal("Привет ", naturalMiddle.Replacement, "Mid-draft write doesn't select the suffix after caret");
+Checks.Equal("Привет | хвост", naturalMiddle.After, "Mid-draft suffix unchanged");
+Checks.True(TypingEdits.NaturalCaret(prefixEdit with { Caret = 3 }, 16) is null, "Unprovable caret movement is refused");
+var safePhrase = "я думаю что это работает";
+var phrase = ContextTyping.Capture(safePhrase + " ", safePhrase.Length + 1)!;
+var contextEdit = ContextTyping.Apply(safePhrase + " ", phrase, "Я думаю, что это работает.")!;
+Checks.Equal("Я думаю, что это работает. ", contextEdit.After, "Context punctuation keeps trailing spaces");
+Checks.Equal(contextEdit.After.Length, contextEdit.Caret, "Context caret accounts for punctuation");
+Checks.True(ContextTyping.IsSafe("еслияпишусловаслитно", "Если я пишу слова слитно."), "Context may split joined words");
+Checks.True(ContextTyping.IsSafe("алексей написал в telegram", "Алексей написал в Telegram."), "Context may capitalize proper names");
+foreach (var (original, output) in new[] { ("я не хочу", "Я хочу."), ("hello world", "Привет, мир."), ("я думаю что всё хорошо", "Думаю, что всё отлично."), ("в 18:30", "В 1830."), ("https://example.com", "https://example. com"), ("@user", "user"), ("текст", "Текст\n") })
+    Checks.True(!ContextTyping.IsSafe(original, output), "Automatic AI refuses changed words/details: " + original);
+Checks.True(ContextTyping.Capture("привет мир", 7) is null, "No context editing in the middle of a paragraph");
+Checks.True(ContextTyping.Capture(new string('а', 601), 601) is null, "Context input is bounded");
+Checks.True(!ContextTyping.IsSafe("температура -2", "Температура 2."), "Automatic AI preserves signed numbers");
+Checks.Equal("Привет как дела ", SmartTyping.Edit(engine, "ghbdtn rfr ltkf ", 16, smartSettings, word => word == "дела" ? new(SpellingState.Correct, []) : SpellingResult.Unavailable)?.After ?? "", "Whole wrong-layout phrase uses Windows dictionary beyond seed words");
+Checks.Equal("Я использую GitHub и Telegram ", SmartTyping.Edit(engine, "я использую github и telegram ", 30, smartSettings)?.After ?? "", "Canonical brand case");
+Checks.Equal("Я написал Алексею ", SmartTyping.Edit(engine, "я написал Алексею ", 18, smartSettings)?.After ?? "", "Existing inflected name remains intact");
+Checks.True(SmartTyping.Edit(engine, "Hello world ", 12, smartSettings, _ => new(SpellingState.Correct, [])) is null, "Real English is not translated");
 foreach (var (before, expected) in new[] {
     ("привет ", "Привет "), ("я дома ", "Я дома "), ("привет мир ", "Привет мир "),
     ("Привет! как дела ", "Привет! Как дела "), ("Привет. как дела ", "Привет. Как дела "),
@@ -110,6 +135,12 @@ Checks.True(FieldPolicy.Allows(new("notepad", false, true, true, true), ["NOTEPA
 foreach (var uri in new[] { "https://127.0.0.1:1234", "http://example.com", "http://localhost:1234", "http://127.0.0.1:1234/private", "http://127.0.0.1:1234?url=evil", "http://user@127.0.0.1:1234" })
     Checks.Throws<ArgumentException>(() => new RewriteClient(new(uri)), "Remote/ambiguous endpoint refused: " + uri);
 var handler = new FakeHandler();
+var typingHandler = new SequenceHandler("Я всё проверю.", "Я думаю, что это работает.");
+var typingClient = new RewriteClient(new("http://127.0.0.1:17864"), new HttpClient(typingHandler));
+Checks.Equal("Я думаю, что это работает.", await typingClient.RewriteAsync("я думаю что это работает", RewriteStyle.Typing, CancellationToken.None), "Unsafe context answer retries with strict guard");
+Checks.Equal(2, typingHandler.Calls, "Context guard retries at most once");
+try { await new RewriteClient(new("http://127.0.0.1:17864"), new HttpClient(new SequenceHandler("Привет, мир."))).RewriteAsync("hello world", RewriteStyle.Typing, CancellationToken.None); throw new Exception("Translation accepted by automatic context mode."); }
+catch (InvalidDataException) { Checks.True(true, "Automatic translation is refused"); }
 var client = new RewriteClient(new("http://127.0.0.1:17864"), new HttpClient(handler));
 Checks.Equal("Проверю завтра.", await client.RewriteAsync("Завтра я всё проверю", RewriteStyle.Short, CancellationToken.None), "Rewrite response");
 using (var json = JsonDocument.Parse(handler.Body!))

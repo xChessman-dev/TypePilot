@@ -45,6 +45,27 @@ internal static class FieldIntegrationCheck
             Require(after.Identity == original.Identity, "Undo is restricted to the same fixture field");
             Require(await fields.ReplaceAsync(after, 0, 6, "превет", 7, ["TypePilot"], false, timeout.Token), "UIA undo input");
             await Task.Delay(100, timeout.Token); Require(box.Text == "превет ", "UIA undo");
+            box.Text = "привет как дела "; box.CaretIndex = box.Text.Length;
+            var prefixSource = (await fields.ReadAsync(["TypePilot"], true, fixtureHandle))!;
+            var prefix = SmartTyping.Edit(vm.Engine, prefixSource.Text, prefixSource.End, vm.Settings)!;
+            Require(prefix.Original.Length == 1, "Capitalization regression uses a one-letter minimal edit");
+            Require(await fields.ReplaceAsync(prefixSource, prefix.Start, prefix.Original.Length, prefix.Replacement, prefix.Caret, ["TypePilot"], false, timeout.Token), "One-letter capitalization input");
+            await Task.Delay(100, timeout.Token);
+            Require(box.Text == "Привет как дела " && box.CaretIndex == box.Text.Length, "Capitalization leaves caret at end, not after the capital letter");
+            Require(NativeMethods.TypeUnicode("сегодня"), "Synthetic next word input");
+            await Task.Delay(100, timeout.Token);
+            Require(box.Text == "Привет как дела сегодня", "Typing continues at the same caret after capitalization");
+            box.Text = "привет"; box.CaretIndex = box.Text.Length;
+            Require(NativeMethods.TypeUnicode(" "), "Owned fixture input resets Windows idle time");
+            await Task.Delay(50, timeout.Token);
+            var activeSource = (await fields.ReadAsync(["TypePilot"], true, fixtureHandle))!;
+            Require(!await fields.ReplaceAsync(activeSource, 0, 1, "П", 7, ["TypePilot"], false, timeout.Token, true), "Automatic write refused during active input");
+            Require(box.Text == "привет " && box.CaretIndex == 7, "Refused active-input write leaves caret and text intact");
+            box.Text = "привет | хвост"; box.CaretIndex = 7;
+            var middleSource = (await fields.ReadAsync(["TypePilot"], true, fixtureHandle))!;
+            Require(await fields.ReplaceAsync(middleSource, 0, 1, "П", 7, ["TypePilot"], false, timeout.Token), "Middle-of-draft capitalization input");
+            await Task.Delay(100, timeout.Token);
+            Require(box.Text == "Привет | хвост" && box.CaretIndex == 7, "Middle caret and following text preserved");
             box.Text = "Привет , "; box.CaretIndex = box.Text.Length;
             var typographySource = (await fields.ReadAsync(["TypePilot"], true, fixtureHandle))!;
             var typography = SmartTyping.Edit(vm.Engine, typographySource.Text, typographySource.End, vm.Settings)!;
@@ -84,7 +105,7 @@ internal static class FieldIntegrationCheck
             box.Text = "Пользователь изменил исходник";
             Require(!await staleQuick.ApplyAsync(), "Quick rewrite stale result refused");
             Require(box.Text == "Пользователь изменил исходник", "Changed source kept intact"); staleQuick.Close();
-            await File.WriteAllTextAsync(Path.Combine(output, "field-check.json"), JsonSerializer.Serialize(new { passed = true, uiaRead = true, uiaWrite = true, undo = true, typographyUndo = true, tabHookInstallation = true, caret = true, noFocusSteal = true, passwordsRefused = true, staleRefused = true, selectedRangeApply = true, fixtureOnly = true, browserEndToEnd = false }));
+            await File.WriteAllTextAsync(Path.Combine(output, "field-check.json"), JsonSerializer.Serialize(new { passed = true, uiaRead = true, uiaWrite = true, undo = true, typographyUndo = true, tabHookInstallation = true, caret = true, capitalizationCaret = true, continuedTyping = true, middleCaret = true, noFocusSteal = true, passwordsRefused = true, staleRefused = true, selectedRangeApply = true, fixtureOnly = true, browserEndToEnd = false }));
             window.Close(); app.Shutdown();
         }
         catch (Exception ex)

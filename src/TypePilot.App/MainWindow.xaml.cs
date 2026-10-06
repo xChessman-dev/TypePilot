@@ -19,6 +19,9 @@ public partial class MainWindow : Window
     private readonly bool _demo;
     private readonly DispatcherTimer _suggestTimer, _resourceTimer;
     private readonly DispatcherTimer _globalTabTimer, _editorTabTimer;
+    private readonly DispatcherTimer _editorContextTimer;
+    private CancellationTokenSource? _editorContextCancellation;
+    private bool _editorAssisting;
     private readonly TabSelection _globalTab = new(), _editorTab = new();
     private readonly SuggestionKeys _suggestionKeys;
     private string _editorOfferText = "";
@@ -42,7 +45,7 @@ public partial class MainWindow : Window
         _demo = demo;
         var settings = smoke ? Path.Combine(AppContext.BaseDirectory, "data", "smoke-settings.json") : Path.Combine(AppContext.BaseDirectory, "data", "settings.json");
         _vm = new(settings, new DispatcherSynchronizationContext(Dispatcher));
-        _global = new(_vm.Engine, () => _vm.Settings, Dispatcher, _spelling.Analyze);
+        _global = new(_vm.Engine, () => _vm.Settings, Dispatcher, _spelling.Analyze, _vm.AssistTypingAsync);
         _suggestionKeys = new(Dispatcher, CycleGlobalTab, _global.Dismiss, CancelGlobalTab);
         _globalTabTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(600), DispatcherPriority.Input, (_, _) =>
         { var index = _globalTab.Index; CancelGlobalTab(); if (index >= 0) AcceptGlobal(index); }, Dispatcher); _globalTabTimer.Stop();
@@ -50,6 +53,7 @@ public partial class MainWindow : Window
         { var index = _editorTab.Index; CancelEditorTab(); if (index >= 0 && index < _vm.Suggestions.Count && EditorBox.IsKeyboardFocused && EditorBox.Text == _editorOfferText && EditorBox.CaretIndex == _editorOfferCaret) Accept(_vm.Suggestions[index]); }, Dispatcher); _editorTabTimer.Stop();
         _suggestTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(150), DispatcherPriority.Background, (_, _) => RefreshSuggestions(), Dispatcher); _suggestTimer.Stop();
         _resourceTimer = new DispatcherTimer(TimeSpan.FromSeconds(1), DispatcherPriority.Background, (_, _) => SampleResources(), Dispatcher); _resourceTimer.Stop();
+        _editorContextTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(1500), DispatcherPriority.Background, async (_, _) => await AssistEditorAsync(), Dispatcher); _editorContextTimer.Stop();
         InitializeComponent();
         DataContext = _vm;
         _global.StatusChanged += status => GlobalStatus.Text = status;
@@ -61,7 +65,7 @@ public partial class MainWindow : Window
     {
         await _vm.LoadAsync(_smoke);
         SpellingStatus.Text = _spelling.Status;
-        _vm.SettingsChanged += () => { UpdateIntegration(); _ = _vm.PersistFlagsAsync(); };
+        _vm.SettingsChanged += () => { CancelEditorContext(); UpdateIntegration(); _ = _vm.PersistFlagsAsync(); };
         if (!_smoke) { UpdateIntegration(); SetUpTray(); _resourceTimer.Start(); }
         else await SmokeChecks.RunUiAsync(this, _vm, _demo);
     }
@@ -138,9 +142,11 @@ public partial class MainWindow : Window
     private void EditorChanged(object sender, TextChangedEventArgs e)
     {
         if (_editing || EditorBox is null || _vm is null) return;
+        CancelEditorContext();
         CancelEditorTab();
         _vm.Editor = EditorBox.Text;
-        var edit = _skipBoundary ? null : SmartTyping.Edit(_vm.Engine, EditorBox.Text, EditorBox.CaretIndex, _vm.Settings);
+        var skip = _skipBoundary;
+        var edit = skip ? null : SmartTyping.Edit(_vm.Engine, EditorBox.Text, EditorBox.CaretIndex, _vm.Settings, _spelling.Analyze);
         _skipBoundary = false;
         if (edit is not null)
         {
@@ -150,8 +156,41 @@ public partial class MainWindow : Window
         else if (_lastEdit is not null && EditorBox.Text != _lastEdit.After) _lastEdit = null;
         UndoButton.IsEnabled = _lastEdit is not null;
         ScheduleSuggestions();
+        if (!_smoke && !skip && _vm.ContextAssist)
+        {
+            var pendingText = EditorBox.Text;
+            // WPF raises SelectionChanged after TextChanged for normal typing. Arm
+            // after that caret update; otherwise it cancels every idle check.
+            Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
+            { if (_vm.ContextAssist && EditorBox.Text == pendingText && EditorBox.IsKeyboardFocused) _editorContextTimer.Start(); });
+        }
     }
-    private void EditorSelectionChanged(object sender, RoutedEventArgs e) { if (!_editing && _vm is not null) { CancelEditorTab(); ScheduleSuggestions(); } }
+    private void EditorSelectionChanged(object sender, RoutedEventArgs e) { if (!_editing && _vm is not null) { CancelEditorContext(); CancelEditorTab(); ScheduleSuggestions(); } }
+    private void CancelEditorContext() { _editorContextTimer?.Stop(); _editorContextCancellation?.Cancel(); }
+    private async Task AssistEditorAsync()
+    {
+        _editorContextTimer.Stop();
+        if (_editorAssisting || !_vm.ContextAssist || !EditorBox.IsKeyboardFocused || EditorBox.SelectionLength != 0 || _vm.Busy) return;
+        var text = EditorBox.Text; var caret = EditorBox.CaretIndex;
+        if (ContextTyping.Capture(text, caret) is not { } phrase) return;
+        _editorAssisting = true;
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30)); _editorContextCancellation = cancellation;
+        try
+        {
+            var result = await _vm.AssistTypingAsync(phrase.Text, cancellation.Token);
+            if (cancellation.IsCancellationRequested || !_vm.ContextAssist || !EditorBox.IsKeyboardFocused || EditorBox.Text != text || EditorBox.CaretIndex != caret || EditorBox.SelectionLength != 0) return;
+            if (result is null) { if (AiRuntime.IsInstalled(_vm.Settings.AiRoot)) _editorContextTimer.Start(); return; }
+            if (ContextTyping.Apply(text, phrase, result) is not { } edit) return;
+            ReplaceEditorRange(edit.Start, edit.Original.Length, edit.Replacement, edit.Caret);
+            _lastEdit = edit; UndoButton.IsEnabled = true; _vm.Corrections++;
+            _vm.Status = "Запятые, регистр и пробелы проверены · Backspace — вернуть";
+            ScheduleSuggestions();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or InvalidOperationException or ArgumentException or TimeoutException or System.Text.Json.JsonException)
+        { _vm.Status = "Контекстная правка пропущена: " + ex.Message; }
+        finally { if (_editorContextCancellation == cancellation) _editorContextCancellation = null; _editorAssisting = false; }
+    }
     private void ScheduleSuggestions() { _suggestTimer.Stop(); _suggestTimer.Start(); }
     private void RefreshSuggestions()
     {
@@ -191,6 +230,7 @@ public partial class MainWindow : Window
     }
     private void UndoCorrection(object sender, RoutedEventArgs e)
     {
+        CancelEditorContext();
         if (_lastEdit is null || !TextEngine.TryUndo(_lastEdit, EditorBox.Text, out _)) { _lastEdit = null; UndoButton.IsEnabled = false; return; }
         var edit = _lastEdit; _lastEdit = null;
         ReplaceEditorRange(edit.Start, edit.Replacement.Length, edit.Original, edit.Caret + edit.Original.Length - edit.Replacement.Length);
@@ -256,7 +296,7 @@ public partial class MainWindow : Window
     private void WindowClosing(object? sender, CancelEventArgs e)
     {
         if (!_quit && !_smoke) { e.Cancel = true; Hide(); return; }
-        _suggestTimer.Stop(); _resourceTimer.Stop(); _globalTabTimer.Stop(); _editorTabTimer.Stop(); _suggestionKeys.Dispose(); _global.Dispose(); _quickRewrite?.Close(); _vm.Dispose(); _spelling.Dispose();
+        CancelEditorContext(); _suggestTimer.Stop(); _resourceTimer.Stop(); _globalTabTimer.Stop(); _editorTabTimer.Stop(); _suggestionKeys.Dispose(); _global.Dispose(); _quickRewrite?.Close(); _vm.Dispose(); _spelling.Dispose();
         _source?.RemoveHook(WindowMessage); NativeMethods.UnregisterHotKey(_handle, 1); NativeMethods.UnregisterHotKey(_handle, 2);
         _tray?.Dispose(); _icon?.Dispose();
         _suggestions?.Close(); _quickRewrite?.Close();
@@ -276,4 +316,5 @@ public partial class MainWindow : Window
         button.IsChecked = true; Navigate(button, new()); UpdateLayout();
     }
     internal void SmokeSetStyle(int index) => StyleBox.SelectedIndex = index;
+    internal void SmokeScroll(double offset) { PageScroll.ScrollToVerticalOffset(offset); UpdateLayout(); }
 }

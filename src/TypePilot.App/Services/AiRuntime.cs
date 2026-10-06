@@ -43,10 +43,14 @@ public sealed class AiRuntime : IRewriteRuntime
             var endpoint = new Uri(settings.AiEndpoint);
             _ = new RewriteClient(endpoint, _http); // Validate before starting a process or sending text.
             if (!IsLoaded) await StartAsync(settings, endpoint, token);
-            StatusChanged?.Invoke("ИИ переформулирует текст…");
-            return await new RewriteClient(endpoint, _http).RewriteAsync(text, style, token);
+            StatusChanged?.Invoke(style == RewriteStyle.Typing ? "ИИ проверяет запятые, имена и пробелы…" : "ИИ переформулирует текст…");
+            var result = await new RewriteClient(endpoint, _http).RewriteAsync(text, style, token);
+            if (style == RewriteStyle.Typing) StatusChanged?.Invoke("Контекстный ответ готов · ИИ выгружается после простоя");
+            return result;
         }
-        catch (OperationCanceledException) { StopProcess(); throw; }
+        // StartAsync itself cleans up a cancelled cold load. Cancelling an obsolete
+        // generation must not repeatedly unload an already warm model while typing.
+        catch (OperationCanceledException) { StatusChanged?.Invoke("Запрос отменён · текущий текст сохранён"); throw; }
         finally { _lastUse = DateTime.UtcNow; _gate.Release(); }
     }
     private async Task StartAsync(PilotSettings settings, Uri endpoint, CancellationToken token)

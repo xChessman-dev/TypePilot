@@ -25,6 +25,14 @@ public sealed partial class TextEngine
         foreach (var word in words.Where(IsWord)) _personal.Add(Normalize(word));
     }
     public bool IsKnown(string word) => _words.ContainsKey(Normalize(word)) || _personal.Contains(Normalize(word));
+    public Suggestion? Automatic(string word, bool fixLayout = true)
+    {
+        if (!IsWord(word) || _personal.Contains(Normalize(word))) return null;
+        if (_aliases.TryGetValue(Normalize(word), out var mapped)) return new(MatchCase(word, mapped), "Частая опечатка", true);
+        if (IsKnown(word) || !fixLayout) return null;
+        var layout = SwapLayout(word);
+        return layout != word && IsKnown(layout) ? new(MatchCase(word, layout), "Другая раскладка", true) : null;
+    }
     public static bool IsWord(string word) => word.Length is >= 2 and <= 48 && word.All(char.IsLetter);
     private static string Normalize(string word) => word.ToLowerInvariant().Replace('ё', 'е');
     public IReadOnlyList<Suggestion> Suggest(string word, int limit = 3)

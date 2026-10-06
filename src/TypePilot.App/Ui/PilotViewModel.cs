@@ -14,7 +14,8 @@ public sealed class PilotViewModel : INotifyPropertyChanged, IDisposable
     private readonly IRewriteRuntime _ai;
     private readonly SynchronizationContext _context;
     private CancellationTokenSource? _rewriteCancellation;
-    private string _editor = "", _result = "", _status = "Готов к набору", _aiStatus = "ИИ спит · не занимает видеопамять", _dictionary = "", _allowed = "";
+    private CancellationTokenSource? _typingCancellation;
+    private string _editor = "", _result = "", _status = "Готов к набору", _aiStatus = "ИИ спит · не занимает видеопамять", _dictionary = "", _allowed = "", _properNames = "";
     private string _rewriteOriginal = "";
     private bool _busy;
     private int _corrections;
@@ -27,6 +28,7 @@ public sealed class PilotViewModel : INotifyPropertyChanged, IDisposable
     public string AiStatus { get => _aiStatus; set => Set(ref _aiStatus, value); }
     public string DictionaryText { get => _dictionary; set => Set(ref _dictionary, value); }
     public string AllowedText { get => _allowed; set => Set(ref _allowed, value); }
+    public string ProperNamesText { get => _properNames; set => Set(ref _properNames, value); }
     public int CharacterCount => Editor.Length;
     public int Corrections { get => _corrections; set => Set(ref _corrections, value); }
     public bool Busy { get => _busy; set { if (Set(ref _busy, value)) RefreshCommands(); } }
@@ -38,6 +40,8 @@ public sealed class PilotViewModel : INotifyPropertyChanged, IDisposable
     public bool SmartPunctuation { get => Settings.SmartPunctuation; set { Settings.SmartPunctuation = value; Notify(); SettingsChanged?.Invoke(); } }
     public bool DoubleSpacePeriod { get => Settings.DoubleSpacePeriod; set { Settings.DoubleSpacePeriod = value; Notify(); SettingsChanged?.Invoke(); } }
     public bool TabSelection { get => Settings.TabSelection; set { Settings.TabSelection = value; Notify(); SettingsChanged?.Invoke(); } }
+    public bool CapitalizeNames { get => Settings.CapitalizeNames; set { Settings.CapitalizeNames = value; Notify(); SettingsChanged?.Invoke(); } }
+    public bool ContextAssist { get => Settings.ContextAssist; set { Settings.ContextAssist = value; Notify(); SettingsChanged?.Invoke(); } }
     public RewriteStyle Style { get; set; } = RewriteStyle.Clear;
     public string AiRoot { get => Settings.AiRoot; set { Settings.AiRoot = value; Notify(); } }
     public long AiMemoryMb => _ai.MemoryMb;
@@ -56,7 +60,7 @@ public sealed class PilotViewModel : INotifyPropertyChanged, IDisposable
         _context = context ?? SynchronizationContext.Current ?? new SynchronizationContext();
         _ai.StatusChanged += status => _context.Post(_ => AiStatus = status, null);
         RewriteCommand = new(() => _ = RewriteAsync(Editor), () => !Busy && !string.IsNullOrWhiteSpace(Editor) && Editor.Length <= 4000);
-        CancelCommand = new(() => _rewriteCancellation?.Cancel(), () => Busy);
+        CancelCommand = new(() => { _rewriteCancellation?.Cancel(); _typingCancellation?.Cancel(); }, () => Busy);
         ApplyCommand = new(ApplyResult, () => !Busy && Result.Length > 0 && Editor == _rewriteOriginal);
         CopyResultCommand = new(() => Copy(Result), () => Result.Length > 0 && !Busy);
         SaveCommand = new(() => _ = SaveAsync(), () => !Busy);
@@ -70,10 +74,12 @@ public sealed class PilotViewModel : INotifyPropertyChanged, IDisposable
         catch (Exception ex) when (ex is IOException or System.Text.Json.JsonException) { Status = "Настройки не прочитаны; исходный файл сохранён. Используются значения по умолчанию."; }
         Settings.AllowedProcesses ??= [];
         Settings.PersonalWords ??= [];
+        Settings.ProperNames ??= [];
         Engine.SetPersonal(Settings.PersonalWords);
         DictionaryText = string.Join(Environment.NewLine, Settings.PersonalWords);
         AllowedText = string.Join(Environment.NewLine, Settings.AllowedProcesses);
-        foreach (var property in new[] { nameof(AutoCorrect), nameof(FixLayout), nameof(GlobalEnabled), nameof(ShowSuggestions), nameof(AutoCapitalize), nameof(SmartPunctuation), nameof(DoubleSpacePeriod), nameof(TabSelection), nameof(AiRoot) }) Notify(property);
+        ProperNamesText = string.Join(Environment.NewLine, Settings.ProperNames);
+        foreach (var property in new[] { nameof(AutoCorrect), nameof(FixLayout), nameof(GlobalEnabled), nameof(ShowSuggestions), nameof(AutoCapitalize), nameof(SmartPunctuation), nameof(DoubleSpacePeriod), nameof(TabSelection), nameof(CapitalizeNames), nameof(ContextAssist), nameof(AiRoot) }) Notify(property);
         AiStatus = AiRuntime.IsInstalled(Settings.AiRoot) ? "Qwen3 4B установлена · сейчас выгружена" : "Модель не установлена · Т9 готов без неё";
     }
     public async Task SaveAsync()
@@ -81,9 +87,11 @@ public sealed class PilotViewModel : INotifyPropertyChanged, IDisposable
         try
         {
             var words = SettingsStore.ParseDictionary(DictionaryText);
+            var names = SettingsStore.ParseDictionary(ProperNamesText);
             var allowed = AllowedText.Split(['\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             if (allowed.Length > 40 || allowed.Any(p => p.Length > 80 || p.Any(c => !char.IsLetterOrDigit(c) && c != '-' && c != '_' && c != '.'))) throw new InvalidDataException("По одному имени процесса без .exe и пути в строке, максимум 40 приложений.");
             Settings.PersonalWords = words.ToList(); Settings.AllowedProcesses = allowed.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            Settings.ProperNames = names.ToList();
             await _store.SaveAsync(Settings);
             Engine.SetPersonal(words); DictionaryText = string.Join(Environment.NewLine, words);
             Status = "Настройки и личный словарь сохранены"; SettingsChanged?.Invoke();
@@ -112,6 +120,14 @@ public sealed class PilotViewModel : INotifyPropertyChanged, IDisposable
         try { return await _ai.RewriteAsync(Settings, text, style, token); }
         finally { Busy = false; }
     }
+    public async Task<string?> AssistTypingAsync(string text, CancellationToken token)
+    {
+        if (Busy || !Settings.ContextAssist || !AiRuntime.IsInstalled(Settings.AiRoot)) return null;
+        Busy = true;
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(token); _typingCancellation = cancellation;
+        try { return await _ai.RewriteAsync(Settings, text, RewriteStyle.Typing, cancellation.Token); }
+        finally { if (_typingCancellation == cancellation) _typingCancellation = null; Busy = false; }
+    }
     private void ApplyResult()
     {
         if (Editor != _rewriteOriginal) { Status = "Текст изменился: результат не применён"; return; }
@@ -129,5 +145,5 @@ public sealed class PilotViewModel : INotifyPropertyChanged, IDisposable
     private bool Set<T>(ref T field, T value, [CallerMemberName] string? property = null)
     { if (EqualityComparer<T>.Default.Equals(field, value)) return false; field = value; Notify(property); return true; }
     private void Notify([CallerMemberName] string? property = null) => PropertyChanged?.Invoke(this, new(property));
-    public void Dispose() { _rewriteCancellation?.Cancel(); _ai.Dispose(); _rewriteCancellation?.Dispose(); }
+    public void Dispose() { _rewriteCancellation?.Cancel(); _typingCancellation?.Cancel(); _ai.Dispose(); _rewriteCancellation?.Dispose(); }
 }

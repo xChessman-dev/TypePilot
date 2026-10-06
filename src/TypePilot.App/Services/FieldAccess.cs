@@ -86,7 +86,7 @@ internal sealed class FieldAccess : IDisposable
         if (bounds.Length == 0 && !current.BoundingRectangle.IsEmpty) anchor = new(current.BoundingRectangle.Left, current.BoundingRectangle.Bottom, 2, 20);
         return new(foreground, IntPtr.Zero, process, "uia:" + string.Join('.', field.GetRuntimeId()), full, start, end, anchor, field);
     }
-    public Task<bool> ReplaceAsync(FieldSnapshot expected, int start, int length, string replacement, int caret, string[] allowed, bool restoreFocus, CancellationToken token) => OnWorker(() =>
+    public Task<bool> ReplaceAsync(FieldSnapshot expected, int start, int length, string replacement, int caret, string[] allowed, bool restoreFocus, CancellationToken token, bool requireIdle = false) => OnWorker(() =>
     {
         if (token.IsCancellationRequested || replacement.Length is < 1 or > 4000 || !NativeMethods.ModifiersReleased) return false;
         if (restoreFocus)
@@ -97,10 +97,13 @@ internal sealed class FieldAccess : IDisposable
         }
         var fresh = Read(allowed, true, expected.Foreground);
         if (fresh is null || !expected.SameContent(fresh) || start < 0 || length < 0 || start + length > fresh.Text.Length || token.IsCancellationRequested) return false;
+        var afterText = fresh.Text[..start] + replacement + fresh.Text[(start + length)..];
+        var natural = TypingEdits.NaturalCaret(new(fresh.Text, afterText, start, fresh.Text.Substring(start, length), replacement, caret), fresh.End);
+        if (natural is null || (requireIdle && !NativeMethods.InputIdle(450))) return false;
+        start = natural.Start; length = natural.Original.Length; replacement = natural.Replacement;
         if (fresh.Native != IntPtr.Zero)
         {
             if (!NativeMethods.Replace(fresh.Native, start, start + length, replacement)) return false;
-            NativeMethods.Message(fresh.Native, NativeMethods.EmSetSel, new(caret), new(caret), out _);
             return true;
         }
         if (!fresh.Element!.TryGetCurrentPattern(TextPattern.Pattern, out var raw)) return false;
@@ -109,21 +112,11 @@ internal sealed class FieldAccess : IDisposable
         // Select only when the provider's character units map exactly to the captured text.
         if (range.MoveEndpointByUnit(TextPatternRangeEndpoint.End, TextUnit.Character, start + length) != start + length ||
             range.MoveEndpointByUnit(TextPatternRangeEndpoint.Start, TextUnit.Character, start) != start || range.GetText(4001) != fresh.Text.Substring(start, length)) return false;
-        if (token.IsCancellationRequested || NativeMethods.GetForegroundWindow() != fresh.Foreground || !NativeMethods.ModifiersReleased) return false;
+        if (token.IsCancellationRequested || NativeMethods.GetForegroundWindow() != fresh.Foreground || !NativeMethods.ModifiersReleased || (requireIdle && !NativeMethods.InputIdle(450))) return false;
         range.Select();
         var selectedFresh = Read(allowed, true, expected.Foreground);
         if (selectedFresh is null || selectedFresh.Identity != fresh.Identity || selectedFresh.Text != fresh.Text || selectedFresh.Start != start || selectedFresh.End != start + length || token.IsCancellationRequested) return false;
         if (!NativeMethods.TypeUnicode(replacement)) return false;
-        Thread.Sleep(60);
-        var after = Read(allowed, true, expected.Foreground);
-        var expectedText = fresh.Text[..start] + replacement + fresh.Text[(start + length)..];
-        if (after is null || after.Identity != fresh.Identity || after.Text != expectedText || token.IsCancellationRequested) return true;
-        if (caret != after.End && after.Element!.TryGetCurrentPattern(TextPattern.Pattern, out var afterRaw))
-        {
-            var caretRange = ((TextPattern)afterRaw).DocumentRange.Clone();
-            caretRange.MoveEndpointByRange(TextPatternRangeEndpoint.End, caretRange, TextPatternRangeEndpoint.Start);
-            if (caretRange.Move(TextUnit.Character, caret) == caret) caretRange.Select();
-        }
         return true;
     }, false);
     public void Dispose() { _disposed = true; _queue.CompleteAdding(); }

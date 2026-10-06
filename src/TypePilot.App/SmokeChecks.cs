@@ -77,6 +77,7 @@ internal static class SmokeChecks
                 await window.Dispatcher.InvokeAsync(() => Capture(window, "editor-" + suffix), DispatcherPriority.ApplicationIdle);
             }
             window.SmokeShowPage("Settings"); await window.Dispatcher.InvokeAsync(() => Capture(window, "settings"), DispatcherPriority.ApplicationIdle);
+            window.SmokeScroll(850); await window.Dispatcher.InvokeAsync(() => Capture(window, "settings-context"), DispatcherPriority.ApplicationIdle);
             var previewText = "превет я завтра проверю приложэение в 18:30";
             var previewField = new FieldSnapshot(IntPtr.Zero, IntPtr.Zero, "Тестовое приложение", "preview", previewText, 0, previewText.Length, new(100, 100, 2, 20));
             var quick = new RewriteWindow(previewField, vm, (_, _, _) => Task.FromResult(false), true);
@@ -120,13 +121,21 @@ internal static class SmokeChecks
                 ("я кароче завтра буду где то в 18:30 тестить эту штуку, потом скажу че получилось", RewriteStyle.Clear),
                 ("Я завтра проверю приложение в 18:30 и после того, как проверка будет закончена, напишу тебе, нормально ли всё работает.", RewriteStyle.Short),
                 ("скинь мне файл когда сможешь, а то я без него не могу закончить работу", RewriteStyle.Polite),
-                ("Превет я завтра проверю приложэение в 18:30", RewriteStyle.Grammar)
+                ("Превет я завтра проверю приложэение в 18:30", RewriteStyle.Grammar),
+                ("я думаю что это работает", RewriteStyle.Typing),
+                ("еслияпишусловаслитно", RewriteStyle.Typing),
+                ("вчера алексей написал в telegram", RewriteStyle.Typing),
+                ("hello how are you", RewriteStyle.Typing)
             })
             {
                 var start = watch.Elapsed.TotalSeconds;
                 var result = await ai.RewriteAsync(settings, input, style, token.Token);
                 if (RewriteGuard.MissingDetails(input, result).Count != 0) throw new Exception("Rewrite lost important information.");
                 if (input == result) throw new Exception("Rewrite left the " + style + " phrase unchanged: " + result);
+                if (style == RewriteStyle.Typing && !ContextTyping.IsSafe(input, result)) throw new Exception("Automatic context changed letters or details.");
+                if (input == "я думаю что это работает" && !result.Contains(',')) throw new Exception("Semantic comma was not inserted.");
+                if (input == "еслияпишусловаслитно" && !result.Contains("я пишу слова", StringComparison.OrdinalIgnoreCase)) throw new Exception("Joined words were not split.");
+                if (input == "вчера алексей написал в telegram" && (!result.Contains("Алексей") || !result.Contains("Telegram"))) throw new Exception("Proper-name case was not restored.");
                 outputs.Add(new { input, result, style = style.ToString(), elapsedSeconds = watch.Elapsed.TotalSeconds - start });
             }
             var memoryMb = ai.MemoryMb;

@@ -72,6 +72,13 @@ internal static class NativeMethods
         return GetWindowRect(window, out var rect) ? new(rect.Left, rect.Bottom, 2, 20) : new(100, 100, 2, 20);
     }
     internal static bool ModifiersReleased => new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C }.All(key => (GetAsyncKeyState(key) & 0x8000) == 0);
+    internal static bool InputIdle(uint milliseconds)
+    {
+        var info = new LastInputInfo { Size = (uint)Marshal.SizeOf<LastInputInfo>() };
+        return GetLastInputInfo(ref info) && unchecked((uint)Environment.TickCount - info.Time) >= milliseconds;
+    }
+    [StructLayout(LayoutKind.Sequential)] private struct LastInputInfo { public uint Size, Time; }
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetLastInputInfo(ref LastInputInfo info);
     internal static bool TypeUnicode(string text)
     {
         // Literal UTF-16 input, no clipboard, Enter key, shortcuts or shell interpretation.

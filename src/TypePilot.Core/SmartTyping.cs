@@ -2,26 +2,44 @@ namespace TypePilot.Core;
 
 public static class SmartTyping
 {
-    public static TextEdit? Edit(TextEngine engine, string text, int caret, PilotSettings settings)
+    public static TextEdit? Edit(TextEngine engine, string text, int caret, PilotSettings settings, Func<string, SpellingResult>? spelling = null)
     {
         if (caret < 1 || caret > text.Length || text.Length > 20000) return null;
         if (!char.IsWhiteSpace(text[caret - 1]) && !".,!?;:".Contains(text[caret - 1])) return null;
         var after = text;
         var cursor = caret;
-        if (settings.AutoCorrect && engine.CorrectAtBoundary(after, cursor, settings.FixLayout) is { } correction)
-        { after = correction.After; cursor = correction.Caret; }
+        if (settings.AutoCorrect || settings.CapitalizeNames) CorrectPhrase(engine, ref after, ref cursor, settings, spelling);
         if (settings.SmartPunctuation) NormalizePunctuation(ref after, ref cursor);
         if (settings.DoubleSpacePeriod) AddPeriod(ref after, ref cursor);
         if (settings.AutoCapitalize) Capitalize(ref after, cursor);
-        if (after == text) return null;
-        var start = 0;
-        while (start < text.Length && start < after.Length && text[start] == after[start]) start++;
-        var oldEnd = text.Length; var newEnd = after.Length;
-        while (oldEnd > start && newEnd > start && text[oldEnd - 1] == after[newEnd - 1]) { oldEnd--; newEnd--; }
-        // UIA literal input cannot insert an empty string. Include one unchanged character
-        // so deletion/insertion and their undo use the same bounded, verified write path.
-        if ((oldEnd == start || newEnd == start) && start > 0) start--;
-        return new(text, after, start, text[start..oldEnd], after[start..newEnd], cursor);
+        return TypingEdits.Difference(text, after, cursor);
+    }
+
+    private static void CorrectPhrase(TextEngine engine, ref string text, ref int caret, PilotSettings settings, Func<string, SpellingResult>? spelling)
+    {
+        var content = text;
+        var names = settings.ProperNames.Where(TextEngine.IsWord).Distinct(StringComparer.OrdinalIgnoreCase).ToDictionary(x => x, StringComparer.OrdinalIgnoreCase);
+        foreach (var match in TextEngine.WordPattern().Matches(content[..caret]).Reverse())
+        {
+            var start = match.Index; var end = start + match.Length;
+            if (start < Math.Max(0, caret - 600) || end == caret || !PlainToken(content, start, end)) continue;
+            var word = match.Value; var replacement = word;
+            if (settings.AutoCorrect)
+            {
+                var automatic = engine.Automatic(word, settings.FixLayout);
+                // A real English word is not a wrong-layout Russian word.
+                var valid = spelling?.Invoke(word).State == SpellingState.Correct;
+                if (automatic is not null && (automatic.Reason != "Другая раскладка" || !valid)) replacement = automatic.Word;
+                else if (settings.FixLayout && !valid && !engine.IsKnown(word) && word.All(c => c is >= 'a' and <= 'z' or >= 'A' and <= 'Z'))
+                {
+                    var swapped = TextEngine.SwapLayout(word);
+                    if (engine.IsKnown(swapped) || spelling?.Invoke(swapped).State == SpellingState.Correct) replacement = swapped;
+                }
+            }
+            if (settings.CapitalizeNames && names.TryGetValue(replacement, out var canonical)) replacement = canonical;
+            if (word == replacement) continue;
+            text = text[..start] + replacement + text[end..]; caret += replacement.Length - word.Length;
+        }
     }
 
     private static (int Start, int End)? LastWord(string text, int caret)

@@ -12,8 +12,11 @@ public sealed class PilotSettings
     public bool SmartPunctuation { get; set; } = true;
     public bool DoubleSpacePeriod { get; set; } = true;
     public bool TabSelection { get; set; } = true;
+    public bool CapitalizeNames { get; set; } = true;
+    public bool ContextAssist { get; set; }
     public List<string> AllowedProcesses { get; set; } = ["notepad", "typepilot", "brave", "chrome", "msedge", "firefox", "Telegram", "Discord"];
     public List<string> PersonalWords { get; set; } = [];
+    public List<string> ProperNames { get; set; } = ["GitHub", "GitLab", "Microsoft", "Google", "Яндекс", "Telegram", "Discord", "YouTube", "Twitch", "TypePilot", "MicPilot", "VoiceBridge", "VoiceMorph", "StreamCensor", "Александр", "Алексей", "Дмитрий", "Михаил", "Никита", "Сергей", "Анастасия", "Екатерина", "Татьяна"];
     public string AiEndpoint { get; set; } = "http://127.0.0.1:17864";
     public string AiRoot { get; set; } = "F:/DevTools/TypePilotAI";
 }

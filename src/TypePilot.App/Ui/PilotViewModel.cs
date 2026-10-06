@@ -33,6 +33,7 @@ public sealed class PilotViewModel : INotifyPropertyChanged, IDisposable
     public bool AutoCorrect { get => Settings.AutoCorrect; set { Settings.AutoCorrect = value; Notify(); SettingsChanged?.Invoke(); } }
     public bool FixLayout { get => Settings.FixLayout; set { Settings.FixLayout = value; Notify(); SettingsChanged?.Invoke(); } }
     public bool GlobalEnabled { get => Settings.GlobalEnabled; set { Settings.GlobalEnabled = value; Notify(); SettingsChanged?.Invoke(); } }
+    public bool ShowSuggestions { get => Settings.ShowSuggestions; set { Settings.ShowSuggestions = value; Notify(); SettingsChanged?.Invoke(); } }
     public RewriteStyle Style { get; set; } = RewriteStyle.Clear;
     public string AiRoot { get => Settings.AiRoot; set { Settings.AiRoot = value; Notify(); } }
     public long AiMemoryMb => _ai.MemoryMb;
@@ -68,7 +69,7 @@ public sealed class PilotViewModel : INotifyPropertyChanged, IDisposable
         Engine.SetPersonal(Settings.PersonalWords);
         DictionaryText = string.Join(Environment.NewLine, Settings.PersonalWords);
         AllowedText = string.Join(Environment.NewLine, Settings.AllowedProcesses);
-        foreach (var property in new[] { nameof(AutoCorrect), nameof(FixLayout), nameof(GlobalEnabled), nameof(AiRoot) }) Notify(property);
+        foreach (var property in new[] { nameof(AutoCorrect), nameof(FixLayout), nameof(GlobalEnabled), nameof(ShowSuggestions), nameof(AiRoot) }) Notify(property);
         AiStatus = AiRuntime.IsInstalled(Settings.AiRoot) ? "Qwen3 4B установлена · сейчас выгружена" : "Модель не установлена · Т9 готов без неё";
     }
     public async Task SaveAsync()
@@ -98,6 +99,13 @@ public sealed class PilotViewModel : INotifyPropertyChanged, IDisposable
         try { Result = await _ai.RewriteAsync(Settings, text, Style, _rewriteCancellation.Token); AiStatus = "Результат готов · проверь смысл перед применением"; }
         catch (OperationCanceledException) { AiStatus = "Запрос отменён · исходный текст сохранён"; }
         catch (Exception ex) when (ex is HttpRequestException or IOException or InvalidOperationException or InvalidDataException or ArgumentException or TimeoutException or System.Text.Json.JsonException) { AiStatus = "ИИ: " + ex.Message; }
+        finally { Busy = false; }
+    }
+    public async Task<string> RewriteExternalAsync(string text, RewriteStyle style, CancellationToken token)
+    {
+        if (Busy) throw new InvalidOperationException("Предыдущая переформулировка ещё выполняется. Закрой или дождись её.");
+        Busy = true;
+        try { return await _ai.RewriteAsync(Settings, text, style, token); }
         finally { Busy = false; }
     }
     private void ApplyResult()

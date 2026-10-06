@@ -1,131 +1,114 @@
 using System.Windows.Threading;
-using System.Windows.Automation;
 using TypePilot.Core;
 
 namespace TypePilot.App;
 
-public sealed class GlobalTyping : IDisposable
+internal sealed record SuggestionOffer(FieldSnapshot Field, WordContext Word, IReadOnlyList<Suggestion> Items);
+
+internal sealed class GlobalTyping : IDisposable
 {
     private readonly TextEngine _engine;
     private readonly Func<PilotSettings> _settings;
-    private readonly Dispatcher _dispatcher;
-    private readonly NativeMethods.WinEventProc _callback;
-    private IntPtr _hook;
-    private IntPtr _pending;
-    private IntPtr _lastWindow;
+    private readonly Func<string, IReadOnlyList<Suggestion>> _spelling;
+    private readonly FieldAccess _fields = new();
+    private readonly DispatcherTimer _poll;
+    private readonly CancellationTokenSource _lifetime = new();
+    private bool _working, _disposed;
+    private string _dismissed = "", _observed = "", _undoSuppressed = "";
+    private FieldSnapshot? _lastAfter;
     private TextEdit? _lastEdit;
-    private string? _undoSuppressedText;
-    private readonly DispatcherTimer _debounce;
-    private readonly SemaphoreSlim _capture = new(1, 1);
+    public SuggestionOffer? CurrentOffer { get; private set; }
     public event Action<string>? StatusChanged;
-    public GlobalTyping(TextEngine engine, Func<PilotSettings> settings, Dispatcher dispatcher)
+    public event Action<SuggestionOffer?>? OfferChanged;
+    public event Action? Corrected;
+    public GlobalTyping(TextEngine engine, Func<PilotSettings> settings, Dispatcher dispatcher, Func<string, IReadOnlyList<Suggestion>>? spelling = null)
     {
-        _engine = engine; _settings = settings; _dispatcher = dispatcher; _callback = Changed;
-        _debounce = new DispatcherTimer(TimeSpan.FromMilliseconds(100), DispatcherPriority.Background, (_, _) => ProcessPending(), dispatcher);
-        _debounce.Stop();
+        _engine = engine; _settings = settings;
+        _spelling = spelling ?? (_ => []);
+        _poll = new DispatcherTimer(TimeSpan.FromMilliseconds(280), DispatcherPriority.Background, async (_, _) => await PollAsync(), dispatcher);
+        _poll.Stop();
     }
     public void SetEnabled(bool enabled)
     {
-        if (_hook != IntPtr.Zero) { NativeMethods.UnhookWinEvent(_hook); _hook = IntPtr.Zero; }
-        _debounce.Stop(); _lastEdit = null;
-        if (enabled)
+        if (enabled) _poll.Start(); else { _poll.Stop(); HideOffer(); }
+        StatusChanged?.Invoke(enabled ? "Т9 в фоне · проверяемые поля Windows и браузера" : "Фоновый Т9 на паузе · горячая клавиша ИИ доступна");
+    }
+    private string[] Allowed => _settings().AllowedProcesses.ToArray();
+    private static string Fingerprint(FieldSnapshot field) => $"{field.Identity}:{field.Start}:{field.End}:{field.Text}";
+    private async Task PollAsync()
+    {
+        if (_working || _disposed || !_settings().GlobalEnabled) return;
+        _working = true;
+        try
         {
-            // Accessibility change events only. No keyboard hooks, injected DLLs or key logs.
-            _hook = NativeMethods.SetWinEventHook(0x800E, 0x800E, IntPtr.Zero, _callback, 0, 0, 2);
-            StatusChanged?.Invoke(_hook == IntPtr.Zero ? "Не удалось подключить системный режим." : "Системный режим: только совместимые Edit / RichEdit.");
-        }
-        else StatusChanged?.Invoke("Системный режим выключен · Т9 работает в редакторе");
-    }
-    private void Changed(IntPtr hook, uint eventType, IntPtr window, int objectId, int childId, uint thread, uint time)
-    {
-        if (!_settings().GlobalEnabled || window == IntPtr.Zero || !IsSafeNativeEdit(window)) return;
-        _dispatcher.BeginInvoke(() => { _pending = window; _debounce.Stop(); _debounce.Start(); });
-    }
-    private void ProcessPending()
-    {
-        _debounce.Stop();
-        var window = _pending;
-        if (!_settings().GlobalEnabled || !_settings().AutoCorrect || !IsSafeNativeEdit(window)) return;
-        var selection = NativeMethods.Selection(window);
-        if (selection is null || selection.Value.Start != selection.Value.End) return;
-        var text = NativeMethods.Text(window);
-        if (text is null) return;
-        if (window == _lastWindow && text == _undoSuppressedText) return;
-        _undoSuppressedText = null;
-        var edit = _engine.CorrectAtBoundary(text, selection.Value.End, _settings().FixLayout);
-        if (edit is null) return;
-        // Abort on changed focus, selection or content instead of replacing a stale word.
-        if (!IsSafeNativeEdit(window) || NativeMethods.Selection(window) != selection || NativeMethods.Text(window) != text) return;
-        if (NativeMethods.Replace(window, edit.Start, edit.Start + edit.Original.Length, edit.Replacement))
-        {
-            NativeMethods.Message(window, NativeMethods.EmSetSel, new(edit.Caret), new(edit.Caret), out _);
-            _lastEdit = edit; _lastWindow = window;
-            StatusChanged?.Invoke("Исправлено слово · Ctrl+Alt+Backspace — отменить");
-        }
-    }
-    private bool IsSafeNativeEdit(IntPtr window)
-    {
-        if (window == IntPtr.Zero || NativeMethods.FocusedControl() != window) return false;
-        var name = NativeMethods.ClassName(window);
-        if (!new[] { "Edit", "RichEdit20W", "RICHEDIT50W", "RichEditD2DPT" }.Contains(name, StringComparer.OrdinalIgnoreCase)) return false;
-        var style = NativeMethods.Style(window);
-        if (style is null) return false;
-        return FieldPolicy.Allows(new(NativeMethods.ProcessName(window), (style.Value & 0x20) != 0, (style.Value & 0x800) == 0 && (style.Value & 0x08000000) == 0, true, true), _settings().AllowedProcesses);
-    }
-    public bool Undo()
-    {
-        if (_lastEdit is null || !IsSafeNativeEdit(_lastWindow)) return false;
-        var current = NativeMethods.Text(_lastWindow);
-        var selection = NativeMethods.Selection(_lastWindow);
-        if (current != _lastEdit.After || selection != (_lastEdit.Caret, _lastEdit.Caret)) { _lastEdit = null; return false; }
-        var edit = _lastEdit; _lastEdit = null;
-        _undoSuppressedText = edit.Before;
-        var done = NativeMethods.Replace(_lastWindow, edit.Start, edit.Start + edit.Replacement.Length, edit.Original);
-        if (done)
-        {
-            var caret = edit.Caret + edit.Original.Length - edit.Replacement.Length;
-            NativeMethods.Message(_lastWindow, NativeMethods.EmSetSel, new(caret), new(caret), out _);
-            // The restored typo is protected until the next value change from real typing.
-            _debounce.Stop();
-        }
-        return done;
-    }
-    public async Task<string?> CaptureSelectionAsync()
-    {
-        if (!await _capture.WaitAsync(0)) throw new InvalidOperationException("Предыдущий запрос к текстовому полю ещё выполняется.");
-        var settings = _settings();
-        var allowed = settings.AllowedProcesses.ToArray();
-        var foreground = NativeMethods.GetForegroundWindow();
-        var expectedProcess = NativeMethods.ProcessName(foreground);
-        var task = Task.Run(() =>
-        {
-            try
+            var field = await _fields.ReadAsync(Allowed).WaitAsync(TimeSpan.FromSeconds(2));
+            if (_disposed || !_settings().GlobalEnabled) { HideOffer(); return; }
+            if (field is null) { _observed = ""; HideOffer(); return; }
+            var fingerprint = Fingerprint(field);
+            if (_observed == fingerprint) return;
+            _observed = fingerprint;
+            var word = TypingContext.WordBeforeCaret(field.Text, field.Start, field.End);
+            if (word is null || fingerprint == _undoSuppressed) { HideOffer(); return; }
+            if (_settings().AutoCorrect && word.AtBoundary && fingerprint != _dismissed)
             {
-                var field = AutomationElement.FocusedElement;
-                if (field is null || NativeMethods.GetForegroundWindow() != foreground) return null;
-                var password = field.GetCurrentPropertyValue(AutomationElement.IsPasswordProperty, true);
-                var supported = field.Current.ControlType == ControlType.Edit || field.Current.ControlType == ControlType.Document;
-                if (password is not false || !supported || !allowed.Contains(expectedProcess, StringComparer.OrdinalIgnoreCase)) return null;
-                if (!field.TryGetCurrentPattern(TextPattern.Pattern, out var raw)) return null;
-                var ranges = ((TextPattern)raw).GetSelection();
-                if (ranges.Length != 1) return null;
-                var readOnly = ranges[0].GetAttributeValue(TextPattern.IsReadOnlyAttribute);
-                NativeMethods.GetWindowThreadProcessId(foreground, out var expectedId);
-                if (field.Current.ProcessId != expectedId || !FieldPolicy.Allows(new(expectedProcess, password is bool known ? known : null, readOnly is false && field.Current.IsEnabled, field.Current.HasKeyboardFocus, supported), allowed)) return null;
-                var text = ranges[0].GetText(4001);
-                if (NativeMethods.GetForegroundWindow() != foreground || string.IsNullOrWhiteSpace(text) || text.Length > 4000) return null;
-                return text;
+                var edit = _engine.CorrectAtBoundary(field.Text, field.End, _settings().FixLayout);
+                if (edit is not null && NativeMethods.ModifiersReleased && await _fields.ReplaceAsync(field, edit.Start, edit.Original.Length, edit.Replacement, edit.Caret, Allowed, false, _lifetime.Token))
+                {
+                    await Task.Delay(70, _lifetime.Token);
+                    var after = await _fields.ReadAsync(Allowed);
+                    if (after is not null && after.Identity == field.Identity && after.Text == edit.After) { _lastAfter = after; _lastEdit = edit; }
+                    StatusChanged?.Invoke("Опечатка исправлена · Ctrl+Alt+Backspace — отменить"); Corrected?.Invoke(); HideOffer(); return;
+                }
             }
-            catch (System.Runtime.InteropServices.COMException) { return null; }
-            catch (ElementNotAvailableException) { return null; }
-            catch (InvalidOperationException) { return null; }
-            finally { _capture.Release(); }
-        });
-        var completed = await Task.WhenAny(task, Task.Delay(2000));
-        return completed == task ? await task : null;
+            if (!_settings().ShowSuggestions || fingerprint == _dismissed) { HideOffer(); return; }
+            var items = _engine.Suggest(word.Word).Concat(_engine.IsKnown(word.Word) ? [] : _spelling(word.Word)).Concat(word.AtBoundary ? [] : _engine.Complete(word.Word))
+                .Where(s => _settings().FixLayout || s.Reason != "Другая раскладка")
+                .DistinctBy(s => s.Word.ToLowerInvariant()).Take(3).ToArray();
+            CurrentOffer = items.Length == 0 ? null : new(field, word, items);
+            OfferChanged?.Invoke(CurrentOffer);
+        }
+        catch (OperationCanceledException) { HideOffer(); }
+        catch (TimeoutException) { HideOffer(); StatusChanged?.Invoke("Поле не отвечает · Т9 не меняет текст"); }
+        finally { _working = false; }
     }
-    public void Dispose()
+    private void HideOffer() { if (CurrentOffer is null) return; CurrentOffer = null; OfferChanged?.Invoke(null); }
+    public void Dismiss() { if (CurrentOffer is not null) _dismissed = Fingerprint(CurrentOffer.Field); HideOffer(); }
+    public async Task AcceptAsync(int index)
     {
-        _debounce.Stop(); if (_hook != IntPtr.Zero) NativeMethods.UnhookWinEvent(_hook); _hook = IntPtr.Zero;
+        var offer = CurrentOffer;
+        Dismiss();
+        if (offer is null || index < 0 || index >= offer.Items.Count || _disposed) return;
+        for (var attempt = 0; attempt < 30 && !NativeMethods.ModifiersReleased; attempt++) await Task.Delay(20);
+        var edit = TextEngine.Replace(offer.Field.Text, offer.Word.Start, offer.Word.Length, offer.Items[index].Word, offer.Field.End);
+        if (await _fields.ReplaceAsync(offer.Field, edit.Start, edit.Original.Length, edit.Replacement, edit.Caret, Allowed, false, _lifetime.Token))
+        {
+            await Task.Delay(70, _lifetime.Token);
+            var after = await _fields.ReadAsync(Allowed);
+            if (after is not null && after.Identity == offer.Field.Identity && after.Text == edit.After) { _lastAfter = after; _lastEdit = edit; }
+            StatusChanged?.Invoke("Подсказка принята · Ctrl+Alt+Backspace — отменить"); Corrected?.Invoke();
+        }
+        else StatusChanged?.Invoke("Поле или текст изменились — подсказка не вставлена");
     }
+    public async Task UndoAsync()
+    {
+        if (_lastEdit is null || _lastAfter is null) return;
+        var edit = _lastEdit; var after = _lastAfter; _lastEdit = null;
+        for (var attempt = 0; attempt < 30 && !NativeMethods.ModifiersReleased; attempt++) await Task.Delay(20);
+        if (await _fields.ReplaceAsync(after, edit.Start, edit.Replacement.Length, edit.Original, edit.Caret + edit.Original.Length - edit.Replacement.Length, Allowed, false, _lifetime.Token))
+        {
+            await Task.Delay(70, _lifetime.Token);
+            var restored = await _fields.ReadAsync(Allowed);
+            if (restored is not null) _undoSuppressed = Fingerprint(restored);
+            StatusChanged?.Invoke("Исходное слово возвращено"); HideOffer();
+        }
+        else StatusChanged?.Invoke("Текст уже изменился — безопасная отмена недоступна");
+    }
+    public async Task<FieldSnapshot?> CaptureSelectionAsync()
+    {
+        var field = await _fields.ReadAsync(Allowed).WaitAsync(TimeSpan.FromSeconds(2));
+        return field is not null && !string.IsNullOrWhiteSpace(field.SelectedText) && field.SelectedText.Length <= 4000 ? field : null;
+    }
+    public Task<bool> ApplyRewriteAsync(FieldSnapshot field, string result, CancellationToken token) =>
+        _fields.ReplaceAsync(field, field.Start, field.End - field.Start, result, field.Start + result.Length, Allowed, true, token);
+    public void Dispose() { _disposed = true; _poll.Stop(); _lifetime.Cancel(); _fields.Dispose(); }
 }

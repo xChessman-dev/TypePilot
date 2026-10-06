@@ -60,6 +60,41 @@ internal static class NativeMethods
         var style = GetWindowLong(window, -16);
         return style == 0 && Marshal.GetLastPInvokeError() != 0 ? null : style;
     }
+    internal static System.Windows.Rect Anchor(IntPtr window)
+    {
+        var thread = GetWindowThreadProcessId(GetForegroundWindow(), out _);
+        var info = new GuiThreadInfo { Size = (uint)Marshal.SizeOf<GuiThreadInfo>() };
+        if (GetGUIThreadInfo(thread, ref info) && info.Caret != IntPtr.Zero)
+        {
+            var point = new Point { X = info.CaretRect.Left, Y = info.CaretRect.Bottom };
+            if (ClientToScreen(info.Caret, ref point)) return new(point.X, point.Y, 2, 20);
+        }
+        return GetWindowRect(window, out var rect) ? new(rect.Left, rect.Bottom, 2, 20) : new(100, 100, 2, 20);
+    }
+    internal static bool ModifiersReleased => new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C }.All(key => (GetAsyncKeyState(key) & 0x8000) == 0);
+    internal static bool TypeUnicode(string text)
+    {
+        // Literal UTF-16 input, no clipboard, Enter key, shortcuts or shell interpretation.
+        // Newlines use WM_CHAR packet semantics, not a Return key that might send a message.
+        if (text.Length is < 1 or > 4000 || !ModifiersReleased) return false;
+        var events = new Input[text.Length * 2];
+        for (var i = 0; i < text.Length; i++)
+        {
+            events[i * 2] = new() { Type = 1, Data = new() { Keyboard = new() { Scan = text[i], Flags = 4 } } };
+            events[i * 2 + 1] = new() { Type = 1, Data = new() { Keyboard = new() { Scan = text[i], Flags = 6 } } };
+        }
+        return SendInput((uint)events.Length, events, Marshal.SizeOf<Input>()) == events.Length;
+    }
+    [StructLayout(LayoutKind.Sequential)] private struct Point { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)] private struct KeyboardInput { public ushort Key, Scan; public uint Flags, Time; public UIntPtr Extra; }
+    [StructLayout(LayoutKind.Explicit)] private struct InputUnion { [FieldOffset(0)] public KeyboardInput Keyboard; [FieldOffset(0)] public MouseInput Mouse; }
+    [StructLayout(LayoutKind.Sequential)] private struct MouseInput { public int X, Y; public uint Data, Flags, Time; public UIntPtr Extra; }
+    [StructLayout(LayoutKind.Sequential)] private struct Input { public uint Type; public InputUnion Data; }
+    [DllImport("user32.dll")] private static extern uint SendInput(uint count, Input[] inputs, int size);
+    [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool ClientToScreen(IntPtr window, ref Point point);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(IntPtr window, out Rect rect);
     [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] private struct GuiThreadInfo
     { public uint Size, Flags; public IntPtr Active, Focus, Capture, MenuOwner, MoveSize, Caret; public Rect CaretRect; }

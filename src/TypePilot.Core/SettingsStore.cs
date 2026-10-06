@@ -6,7 +6,8 @@ public sealed class PilotSettings
 {
     public bool AutoCorrect { get; set; } = true;
     public bool FixLayout { get; set; } = true;
-    public bool GlobalEnabled { get; set; }
+    public bool GlobalEnabled { get; set; } = true;
+    public bool ShowSuggestions { get; set; } = true;
     public List<string> AllowedProcesses { get; set; } = ["notepad", "typepilot", "brave", "chrome", "msedge", "firefox", "Telegram", "Discord"];
     public List<string> PersonalWords { get; set; } = [];
     public string AiEndpoint { get; set; } = "http://127.0.0.1:17864";

@@ -12,4 +12,4 @@ if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $report)) { throw '
 if ((Get-Item -LiteralPath $report).LastWriteTime -lt $started) { throw 'UI report is stale.' }
 $result=Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
 if (-not $result.passed) { throw ('UI smoke check failed: '+$result.error) }
-Write-Host 'PASS: WPF correction, undo, dictionary, native Edit contract and rendering.'
+Write-Host 'PASS: WPF correction, undo, dictionary, native Edit contract, home/editor/settings and floating-window rendering.'

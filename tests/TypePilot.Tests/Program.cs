@@ -5,6 +5,15 @@ using System.Text;
 using System.Text.Json;
 
 var engine = DefaultEngine.Create();
+Checks.True(new PilotSettings().GlobalEnabled, "Background T9 enabled by default");
+Checks.Equal("прил", TypingContext.WordBeforeCaret("Пишу прил", 9, 9)!.Word, "Word at caret");
+Checks.True(TypingContext.WordBeforeCaret("foo@превет", 10, 10) is null, "Email token is not offered");
+Checks.True(TypingContext.WordBeforeCaret("hello", 0, 5) is null, "Selected text not offered as a word");
+Checks.True(TypingContext.WordBeforeCaret("hello", 100, 100) is null, "Invalid caret ignored");
+Checks.True(TypingContext.WordBeforeCaret("превет! ", 8, 8)!.AtBoundary, "Punctuated boundary token");
+Checks.True(TypingContext.CanApply("abc", 1, 2, "abc", 1, 2), "Same source selection is applicable");
+Checks.True(!TypingContext.CanApply("abc", 1, 2, "abcd", 1, 2), "Changed source refuses replacement");
+Checks.True(!TypingContext.CanApply("abc", 1, 2, "abc", 2, 3), "Moved selection refuses replacement");
 Checks.Equal("привет", engine.Suggest("превет")[0].Word, "Common typo");
 Checks.Equal("Привет", engine.Suggest("Првиет")[0].Word, "Title case");
 Checks.Equal("ПРИВЕТ", engine.Suggest("ПРЕВЕТ")[0].Word, "Upper case");

@@ -8,6 +8,7 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        if (e.Args.Contains("--field-smoke")) { _ = FieldIntegrationCheck.RunAsync(this); return; }
         if (e.Args.Contains("--ai-smoke"))
         {
             _ = SmokeChecks.RunAiAsync(this);

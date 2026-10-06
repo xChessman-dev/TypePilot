@@ -34,6 +34,8 @@ internal static class SmokeChecks
                 if (fakeVm.ApplyCommand.CanExecute(null)) throw new Exception("Stale rewrite preview became applicable.");
                 fakeVm.ApplyCommand.Execute(null);
                 if (fakeVm.Editor != "Пользователь уже изменил текст") throw new Exception("Stale rewrite overwrote user text.");
+                var external = await fakeVm.RewriteExternalAsync("Выделенная фраза", RewriteStyle.Clear, CancellationToken.None);
+                if (string.IsNullOrWhiteSpace(external) || fakeVm.Editor != "Пользователь уже изменил текст") throw new Exception("External rewrite changed the editor draft.");
             }
             window.SmokeSetEditor("Превет, это тест приложения. ");
             window.SmokeSetEditor("Превет "); window.SmokeCorrectBoundary();
@@ -59,10 +61,22 @@ internal static class SmokeChecks
             vm.Suggestions.Clear(); foreach (var word in new[] { "сообщение", "сообщения", "сообщить" }) vm.Suggestions.Add(new(word, "Пример подсказки"));
             foreach (var (width, height, suffix) in new[] { (1180d, 840d, "desktop"), (960d, 720d, "compact") })
             {
+                window.Width = width; window.Height = height; window.SmokeShowPage("Home");
+                await window.Dispatcher.InvokeAsync(() => Capture(window, "home-" + suffix), DispatcherPriority.ApplicationIdle);
                 window.Width = width; window.Height = height; window.SmokeShowPage("Editor");
                 await window.Dispatcher.InvokeAsync(() => Capture(window, "editor-" + suffix), DispatcherPriority.ApplicationIdle);
             }
             window.SmokeShowPage("Settings"); await window.Dispatcher.InvokeAsync(() => Capture(window, "settings"), DispatcherPriority.ApplicationIdle);
+            var previewText = "превет я завтра проверю приложэение в 18:30";
+            var previewField = new FieldSnapshot(IntPtr.Zero, IntPtr.Zero, "Тестовое приложение", "preview", previewText, 0, previewText.Length, new(100, 100, 2, 20));
+            var quick = new RewriteWindow(previewField, vm, (_, _, _) => Task.FromResult(false), true);
+            quick.Show(); quick.SmokePreview("Привет! Завтра проверю приложение в 18:30.");
+            await window.Dispatcher.InvokeAsync(() => Capture(quick, "quick-rewrite"), DispatcherPriority.ApplicationIdle);
+            quick.Close();
+            var suggestionsWindow = new SuggestionWindow(_ => { }, () => { });
+            suggestionsWindow.Present(new(previewField, new(0, 6, "превет", false), [new("привет", "Опечатка"), new("приветы", "Словарь Windows"), new("приветствие", "Продолжение")]));
+            await window.Dispatcher.InvokeAsync(() => Capture(suggestionsWindow, "floating-t9"), DispatcherPriority.ApplicationIdle);
+            suggestionsWindow.Close();
             await File.WriteAllTextAsync(Path.Combine(OutputDir, "ui-check.json"), JsonSerializer.Serialize(new { passed = true, correction = true, undo = true, personalDictionary = true, nativeEditContract = true, externalAppsEndToEnd = false, windowsDictionary = spelling.Status, windowsSuggestions = suggestions.Select(s => s.Word) }));
             window.Close();
         }

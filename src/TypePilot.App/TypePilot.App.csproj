@@ -7,7 +7,10 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <PlatformTarget>x64</PlatformTarget>
     <AssemblyName>TypePilot</AssemblyName>
-    <Version>0.1.0-dev</Version>
+    <Version>0.2.0-dev</Version>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- WPF owns DPI startup; WinForms is used only for the tray, not Application.Run. -->
+    <NoWarn>$(NoWarn);WFO0003</NoWarn>
     <AssemblyVersion>0.1.0.0</AssemblyVersion>
     <ApplicationIcon>Assets/TypePilot.ico</ApplicationIcon>
   </PropertyGroup>

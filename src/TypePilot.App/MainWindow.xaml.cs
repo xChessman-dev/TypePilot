@@ -21,6 +21,9 @@ public partial class MainWindow : Window
     private System.Windows.Forms.NotifyIcon? _tray;
     private System.Drawing.Icon? _icon;
     private HwndSource? _source;
+    private SuggestionWindow? _suggestions;
+    private RewriteWindow? _quickRewrite;
+    private bool _capturing;
     private IntPtr _handle;
     private bool _editing, _quit, _skipBoundary;
     private TextEdit? _lastEdit;
@@ -34,12 +37,14 @@ public partial class MainWindow : Window
         _demo = demo;
         var settings = smoke ? Path.Combine(AppContext.BaseDirectory, "data", "smoke-settings.json") : Path.Combine(AppContext.BaseDirectory, "data", "settings.json");
         _vm = new(settings, new DispatcherSynchronizationContext(Dispatcher));
-        _global = new(_vm.Engine, () => _vm.Settings, Dispatcher);
+        _global = new(_vm.Engine, () => _vm.Settings, Dispatcher, _spelling.Suggest);
         _suggestTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(150), DispatcherPriority.Background, (_, _) => RefreshSuggestions(), Dispatcher); _suggestTimer.Stop();
         _resourceTimer = new DispatcherTimer(TimeSpan.FromSeconds(1), DispatcherPriority.Background, (_, _) => SampleResources(), Dispatcher); _resourceTimer.Stop();
         InitializeComponent();
         DataContext = _vm;
         _global.StatusChanged += status => GlobalStatus.Text = status;
+        _global.Corrected += () => _vm.Corrections++;
+        _global.OfferChanged += PresentSuggestions;
         _vm.ApplyRequested += ApplyEditorText;
     }
     private async void WindowLoaded(object sender, RoutedEventArgs e)
@@ -57,35 +62,53 @@ public partial class MainWindow : Window
         _source = HwndSource.FromHwnd(_handle);
         _source?.AddHook(WindowMessage);
         if (!_smoke && !NativeMethods.RegisterHotKey(_handle, 1, 0x4003, 0x20)) _vm.Status = "Ctrl+Alt+Space уже занят; используй редактор вручную.";
-        if (!_smoke) NativeMethods.RegisterHotKey(_handle, 2, 0x4003, 0x08);
+        if (!_smoke && !NativeMethods.RegisterHotKey(_handle, 2, 0x4003, 0x08)) _vm.Status = "Ctrl+Alt+Backspace уже занят; системная отмена недоступна.";
     }
     private IntPtr WindowMessage(IntPtr hwnd, int message, IntPtr w, IntPtr l, ref bool handled)
     {
         if ((uint)message == NativeMethods.ShowMessage) { ShowWindow(); handled = true; }
         if (message == 0x312 && w.ToInt32() == 1) { _ = CaptureSelection(); handled = true; }
-        if (message == 0x312 && w.ToInt32() == 2) { _global.Undo(); handled = true; }
+        if (message == 0x312 && w.ToInt32() == 2) { UndoGlobal(); handled = true; }
+        if (message == 0x312 && w.ToInt32() is >= 11 and <= 13) { AcceptGlobal(w.ToInt32() - 11); handled = true; }
         return IntPtr.Zero;
     }
     private async Task CaptureSelection()
     {
+        if (_capturing) return;
+        if (_quickRewrite is not null) { _quickRewrite.Show(); _quickRewrite.Activate(); return; }
+        _capturing = true;
         try
         {
-            var text = await _global.CaptureSelectionAsync();
-            ShowWindow(); EditorNav.IsChecked = true;
-            if (text is null) { _vm.Status = "Не удалось безопасно прочитать выделение. Скопируй текст и вставь его в редактор."; return; }
-            if (_vm.Editor.Length > 0 && MessageBox.Show(this, "Заменить текущий текст редактора выделенным фрагментом?", "TypePilot", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
-            ApplyEditorText(text); _vm.Status = "Выделенный текст загружен · ИИ запускается только кнопкой";
+            _global.Dismiss();
+            var field = await _global.CaptureSelectionAsync();
+            for (var attempt = 0; attempt < 40 && !NativeMethods.ModifiersReleased; attempt++) await Task.Delay(20);
+            _quickRewrite = new(field, _vm, _global.ApplyRewriteAsync);
+            _quickRewrite.Closed += (_, _) => _quickRewrite = null;
+            _quickRewrite.Show(); _quickRewrite.Activate();
         }
-        catch (InvalidOperationException ex) { ShowWindow(); _vm.Status = ex.Message; }
+        catch (Exception ex) when (ex is InvalidOperationException or TimeoutException) { ShowWindow(); _vm.Status = ex.Message; }
+        finally { _capturing = false; }
     }
+    private void PresentSuggestions(SuggestionOffer? offer)
+    {
+        for (var index = 0; index < 3; index++) NativeMethods.UnregisterHotKey(_handle, 11 + index);
+        if (offer is null) { _suggestions?.Hide(); return; }
+        _suggestions ??= new(AcceptGlobal, _global.Dismiss);
+        _suggestions.Present(offer);
+        for (var index = 0; index < offer.Items.Count; index++)
+            if (!NativeMethods.RegisterHotKey(_handle, 11 + index, 0x4003, (uint)(0x31 + index))) _vm.Status = $"Ctrl+Alt+{index + 1} занят · выбери подсказку мышью";
+    }
+    private async void AcceptGlobal(int index) { try { await _global.AcceptAsync(index); } catch (OperationCanceledException) { } }
+    private async void UndoGlobal() { try { await _global.UndoAsync(); } catch (OperationCanceledException) { } }
     private void ShowWindow() { Show(); WindowState = WindowState.Normal; Activate(); }
     private void Navigate(object sender, RoutedEventArgs e)
     {
-        if (EditorPage is null || DictionaryPage is null || SettingsPage is null) return;
+        if (EditorPage is null || DictionaryPage is null || SettingsPage is null || HomePage is null) return;
         var page = (sender as RadioButton)?.Tag as string;
         EditorPage.Visibility = page == "Editor" ? Visibility.Visible : Visibility.Collapsed;
         DictionaryPage.Visibility = page == "Dictionary" ? Visibility.Visible : Visibility.Collapsed;
         SettingsPage.Visibility = page == "Settings" ? Visibility.Visible : Visibility.Collapsed;
+        HomePage.Visibility = page == "Home" ? Visibility.Visible : Visibility.Collapsed;
         PageScroll?.ScrollToTop();
     }
     private void StyleChanged(object sender, SelectionChangedEventArgs e)
@@ -194,17 +217,24 @@ public partial class MainWindow : Window
         _icon = new System.Drawing.Icon(stream);
         var menu = new System.Windows.Forms.ContextMenuStrip();
         menu.Items.Add("Открыть TypePilot", null, (_, _) => Dispatcher.BeginInvoke(ShowWindow));
-        menu.Items.Add("Отключить системный Т9", null, (_, _) => Dispatcher.BeginInvoke(() => _vm.GlobalEnabled = false));
+        menu.Items.Add("Включить / выключить Т9", null, (_, _) => Dispatcher.BeginInvoke(() => _vm.GlobalEnabled = !_vm.GlobalEnabled));
         menu.Items.Add("Выход", null, (_, _) => Dispatcher.BeginInvoke(() => { _quit = true; Close(); }));
         _tray = new() { Icon = _icon, Text = "TypePilot · локальный помощник", ContextMenuStrip = menu, Visible = true };
         _tray.DoubleClick += (_, _) => Dispatcher.BeginInvoke(ShowWindow);
     }
+    private void MinimizeClick(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
+    private void MaximizeClick(object sender, RoutedEventArgs e) => WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+    private void CloseClick(object sender, RoutedEventArgs e) => Close();
+    private void HideToTrayClick(object sender, RoutedEventArgs e) => Hide();
+    private void OpenEditorClick(object sender, RoutedEventArgs e) { EditorNav.IsChecked = true; Navigate(EditorNav, e); }
     private void WindowClosing(object? sender, CancelEventArgs e)
     {
         if (!_quit && !_smoke) { e.Cancel = true; Hide(); return; }
-        _suggestTimer.Stop(); _resourceTimer.Stop(); _global.Dispose(); _vm.Dispose(); _spelling.Dispose();
+        _suggestTimer.Stop(); _resourceTimer.Stop(); _global.Dispose(); _quickRewrite?.Close(); _vm.Dispose(); _spelling.Dispose();
         _source?.RemoveHook(WindowMessage); NativeMethods.UnregisterHotKey(_handle, 1); NativeMethods.UnregisterHotKey(_handle, 2);
         _tray?.Dispose(); _icon?.Dispose();
+        _suggestions?.Close(); _quickRewrite?.Close();
+        for (var index = 0; index < 3; index++) NativeMethods.UnregisterHotKey(_handle, 11 + index);
     }
     internal void SmokeSetEditor(string text) => ApplyEditorText(text);
     internal void SmokeCorrectBoundary()
@@ -215,7 +245,7 @@ public partial class MainWindow : Window
     internal void SmokeUndo() => UndoCorrection(this, new());
     internal void SmokeShowPage(string page)
     {
-        var button = page == "Editor" ? EditorNav : page == "Dictionary" ? DictionaryNav : SettingsNav;
+        var button = page == "Home" ? HomeNav : page == "Editor" ? EditorNav : page == "Dictionary" ? DictionaryNav : SettingsNav;
         button.IsChecked = true; Navigate(button, new()); UpdateLayout();
     }
     internal void SmokeSetStyle(int index) => StyleBox.SelectedIndex = index;

@@ -9,12 +9,32 @@ namespace TypePilot.App;
 
 internal static class SmokeChecks
 {
-    private static string OutputDir => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../artifacts/qa"));
-    public static async Task RunUiAsync(MainWindow window, PilotViewModel vm)
+    private static string OutputDir
+    {
+        get
+        {
+            var current = new DirectoryInfo(AppContext.BaseDirectory);
+            for (var depth = 0; current is not null && depth < 7; depth++, current = current.Parent)
+                if (File.Exists(Path.Combine(current.FullName, "TypePilot.slnx"))) return Path.Combine(current.FullName, "artifacts", "qa");
+            return Path.Combine(AppContext.BaseDirectory, "artifacts", "qa");
+        }
+    }
+    public static async Task RunUiAsync(MainWindow window, PilotViewModel vm, bool demo = false)
     {
         Directory.CreateDirectory(OutputDir);
         try
         {
+            NativeEditCheck.Run();
+            using (var fakeVm = new PilotViewModel(Path.Combine(OutputDir, "unused-test-settings.json"), new DispatcherSynchronizationContext(window.Dispatcher), new FakeRuntime()))
+            {
+                fakeVm.Editor = "Исходный текст";
+                await fakeVm.RewriteAsync(fakeVm.Editor);
+                if (!fakeVm.ApplyCommand.CanExecute(null)) throw new Exception("Valid rewrite preview was not applicable.");
+                fakeVm.Editor = "Пользователь уже изменил текст";
+                if (fakeVm.ApplyCommand.CanExecute(null)) throw new Exception("Stale rewrite preview became applicable.");
+                fakeVm.ApplyCommand.Execute(null);
+                if (fakeVm.Editor != "Пользователь уже изменил текст") throw new Exception("Stale rewrite overwrote user text.");
+            }
             window.SmokeSetEditor("Превет, это тест приложения. ");
             window.SmokeSetEditor("Превет "); window.SmokeCorrectBoundary();
             if (vm.Editor != "Привет ") throw new Exception("WPF autocorrect failed: " + vm.Editor);
@@ -28,6 +48,14 @@ internal static class SmokeChecks
             window.SmokeSetEditor("Привет! Это локальный помощник набора.\n\nПишу сообщение без спешки: TypePilot поправляет опечатки, предлагает слова и помогает выразить мысль яснее.");
             vm.Status = "Готов к набору · всё остаётся на компьютере";
             vm.Result = "Пример интерфейса. Реальная генерация проверяется отдельно через --ai-smoke.";
+            if (demo)
+            {
+                window.SmokeSetEditor("Я завтра проверю приложение в 18:30 и после того, как проверка будет закончена, напишу тебе, нормально ли всё работает.");
+                window.SmokeSetStyle(1);
+                await vm.RewriteAsync(vm.Editor);
+                if (string.IsNullOrWhiteSpace(vm.Result)) throw new Exception("Live preview generation failed: " + vm.AiStatus);
+                vm.Status = "Текст готов · Т9 и локальная переформулировка";
+            }
             vm.Suggestions.Clear(); foreach (var word in new[] { "сообщение", "сообщения", "сообщить" }) vm.Suggestions.Add(new(word, "Пример подсказки"));
             foreach (var (width, height, suffix) in new[] { (1180d, 840d, "desktop"), (960d, 720d, "compact") })
             {
@@ -35,7 +63,7 @@ internal static class SmokeChecks
                 await window.Dispatcher.InvokeAsync(() => Capture(window, "editor-" + suffix), DispatcherPriority.ApplicationIdle);
             }
             window.SmokeShowPage("Settings"); await window.Dispatcher.InvokeAsync(() => Capture(window, "settings"), DispatcherPriority.ApplicationIdle);
-            await File.WriteAllTextAsync(Path.Combine(OutputDir, "ui-check.json"), JsonSerializer.Serialize(new { passed = true, correction = true, undo = true, personalDictionary = true, windowsDictionary = spelling.Status, windowsSuggestions = suggestions.Select(s => s.Word) }));
+            await File.WriteAllTextAsync(Path.Combine(OutputDir, "ui-check.json"), JsonSerializer.Serialize(new { passed = true, correction = true, undo = true, personalDictionary = true, nativeEditContract = true, externalAppsEndToEnd = false, windowsDictionary = spelling.Status, windowsSuggestions = suggestions.Select(s => s.Word) }));
             window.Close();
         }
         catch (Exception ex)
@@ -47,8 +75,9 @@ internal static class SmokeChecks
     private static void Capture(Window window, string name)
     {
         window.UpdateLayout();
-        var image = new RenderTargetBitmap((int)window.ActualWidth, (int)window.ActualHeight, 96, 96, PixelFormats.Pbgra32);
-        image.Render(window);
+        var content = (FrameworkElement)window.Content;
+        var image = new RenderTargetBitmap((int)content.ActualWidth, (int)content.ActualHeight, 96, 96, PixelFormats.Pbgra32);
+        image.Render(content);
         var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(image));
         using var stream = File.Create(Path.Combine(OutputDir, name + ".png")); encoder.Save(stream);
     }
@@ -57,7 +86,7 @@ internal static class SmokeChecks
         Directory.CreateDirectory(OutputDir);
         try
         {
-            using var ai = new AiRuntime();
+            using var ai = new AiRuntime(TimeSpan.FromSeconds(1));
             var settings = new PilotSettings();
             using var token = new CancellationTokenSource(TimeSpan.FromMinutes(2));
             var watch = System.Diagnostics.Stopwatch.StartNew();
@@ -72,13 +101,22 @@ internal static class SmokeChecks
                 var start = watch.Elapsed.TotalSeconds;
                 var result = await ai.RewriteAsync(settings, input, style, token.Token);
                 if (RewriteGuard.MissingDetails(input, result).Count != 0) throw new Exception("Rewrite lost important information.");
-                if (input == result) throw new Exception("Rewrite left the test phrase unchanged.");
+                if (input == result) throw new Exception("Rewrite left the " + style + " phrase unchanged: " + result);
                 outputs.Add(new { input, result, style = style.ToString(), elapsedSeconds = watch.Elapsed.TotalSeconds - start });
             }
             var memoryMb = ai.MemoryMb;
-            await ai.UnloadAsync();
-            if (ai.IsLoaded) throw new Exception("Unload failed.");
-            await File.WriteAllTextAsync(Path.Combine(OutputDir, "ai-check.json"), JsonSerializer.Serialize(new { passed = true, outputs, elapsedSeconds = watch.Elapsed.TotalSeconds, memoryMb, unloaded = !ai.IsLoaded }));
+            await Task.Delay(2500, token.Token);
+            var autoUnloaded = !ai.IsLoaded;
+            if (!autoUnloaded) throw new Exception("Idle unload failed.");
+            using var cancelLoad = new CancellationTokenSource(50);
+            try
+            {
+                await ai.RewriteAsync(settings, "Тест отмены загрузки", RewriteStyle.Clear, cancelLoad.Token);
+                throw new Exception("Load cancellation failed.");
+            }
+            catch (OperationCanceledException) { }
+            if (ai.IsLoaded) throw new Exception("Cancelled model remained loaded.");
+            await File.WriteAllTextAsync(Path.Combine(OutputDir, "ai-check.json"), JsonSerializer.Serialize(new { passed = true, outputs, elapsedSeconds = watch.Elapsed.TotalSeconds, memoryMb, idleUnload = autoUnloaded, cancelledLoad = true, unloaded = !ai.IsLoaded }));
             app.Shutdown();
         }
         catch (Exception ex)
@@ -86,5 +124,13 @@ internal static class SmokeChecks
             await File.WriteAllTextAsync(Path.Combine(OutputDir, "ai-check.json"), JsonSerializer.Serialize(new { passed = false, error = ex.ToString() }));
             app.Shutdown(1);
         }
+    }
+    private sealed class FakeRuntime : IRewriteRuntime
+    {
+        public event Action<string>? StatusChanged;
+        public long MemoryMb => 0;
+        public Task<string> RewriteAsync(PilotSettings settings, string text, RewriteStyle style, CancellationToken token) { StatusChanged?.Invoke("Тестовый ответ"); return Task.FromResult("Новый вариант текста"); }
+        public Task UnloadAsync() => Task.CompletedTask;
+        public void Dispose() { }
     }
 }

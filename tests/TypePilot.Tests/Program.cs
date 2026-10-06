@@ -67,6 +67,26 @@ using (var cancelled = new CancellationTokenSource())
     try { await client.RewriteAsync("Привет", RewriteStyle.Clear, cancelled.Token); throw new Exception("Cancellation failed"); }
     catch (OperationCanceledException) { Checks.True(true, "Rewrite cancellation"); }
 }
+var retryHandler = new SequenceHandler("В 18:30 проверю.", "Завтра в 18:30 проверю.");
+var retryClient = new RewriteClient(new("http://127.0.0.1:17864"), new HttpClient(retryHandler));
+Checks.Equal("Завтра в 18:30 проверю.", await retryClient.RewriteAsync("Завтра в 18:30 я проверю", RewriteStyle.Short, CancellationToken.None), "Lost detail retried");
+Checks.Equal(2, retryHandler.Calls, "Only one retry");
+var badHandler = new SequenceHandler("Проверю.", "Проверю.");
+try
+{
+    await new RewriteClient(new("http://127.0.0.1:17864"), new HttpClient(badHandler)).RewriteAsync("Завтра в 18:30 я проверю", RewriteStyle.Short, CancellationToken.None);
+    throw new Exception("Lost details were accepted.");
+}
+catch (InvalidDataException) { Checks.Equal(2, badHandler.Calls, "Lost details refused after bounded retry"); }
+foreach (var (payload, raw) in new[] { ("<think>reasoning</think>text", false), ("", false), ("{}", true), (new string('a', 110000), false) })
+{
+    try
+    {
+        await new RewriteClient(new("http://127.0.0.1:17864"), new HttpClient(new SequenceHandler([payload], raw))).RewriteAsync("Привет", RewriteStyle.Clear, CancellationToken.None);
+        throw new Exception("Invalid response accepted.");
+    }
+    catch (InvalidDataException) { Checks.True(true, "Unsafe/empty/malformed/oversized response refused"); }
+}
 var temp = Path.Combine(Path.GetTempPath(), "typepilot-test-" + Guid.NewGuid().ToString("N"), "settings.json");
 try
 {
@@ -87,5 +107,20 @@ sealed class FakeHandler : HttpMessageHandler
         cancellationToken.ThrowIfCancellationRequested();
         Body = await request.Content!.ReadAsStringAsync(cancellationToken);
         return new(HttpStatusCode.OK) { Content = new StringContent("{\"choices\":[{\"message\":{\"content\":\"Проверю завтра.\"}}]}", Encoding.UTF8, "application/json") };
+    }
+}
+sealed class SequenceHandler : HttpMessageHandler
+{
+    private readonly string[] _results;
+    private readonly bool _raw;
+    public int Calls { get; private set; }
+    public SequenceHandler(params string[] results) { _results = results; }
+    public SequenceHandler(string[] results, bool raw) { _results = results; _raw = raw; }
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var value = _results[Math.Min(Calls++, _results.Length - 1)];
+        var json = _raw ? value : JsonSerializer.Serialize(new { choices = new[] { new { message = new { content = value } } } });
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json, Encoding.UTF8, "application/json") });
     }
 }

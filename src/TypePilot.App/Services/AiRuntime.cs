@@ -6,7 +6,7 @@ using TypePilot.Core;
 
 namespace TypePilot.App;
 
-public sealed class AiRuntime : IDisposable
+public sealed class AiRuntime : IRewriteRuntime
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly HttpClient _http = new(new HttpClientHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(90) };
@@ -15,6 +15,7 @@ public sealed class AiRuntime : IDisposable
     private ProcessJob? _job;
     private DateTime _lastUse = DateTime.UtcNow;
     private bool _disposed;
+    private readonly TimeSpan _idleAfter;
     public bool IsLoaded => _process is { HasExited: false };
     public long MemoryMb
     {
@@ -25,7 +26,13 @@ public sealed class AiRuntime : IDisposable
         }
     }
     public event Action<string>? StatusChanged;
-    public AiRuntime() => _idle = new Timer(_ => TryIdleUnload(), null, 5000, 5000);
+    public AiRuntime(TimeSpan? idleAfter = null)
+    {
+        _idleAfter = idleAfter ?? TimeSpan.FromSeconds(30);
+        if (_idleAfter < TimeSpan.FromSeconds(1)) throw new ArgumentOutOfRangeException(nameof(idleAfter));
+        var interval = (int)Math.Min(5000, _idleAfter.TotalMilliseconds);
+        _idle = new Timer(_ => TryIdleUnload(), null, interval, interval);
+    }
     public static bool IsInstalled(string root) => File.Exists(Path.Combine(root, "runtime", "llama-server.exe")) && File.Exists(Path.Combine(root, "models", "Qwen3-4B-Q4_K_M.gguf"));
     public async Task<string> RewriteAsync(PilotSettings settings, string text, RewriteStyle style, CancellationToken token)
     {
@@ -99,7 +106,7 @@ public sealed class AiRuntime : IDisposable
         if (_disposed || !_gate.Wait(0)) return;
         try
         {
-            if (IsLoaded && DateTime.UtcNow - _lastUse > TimeSpan.FromSeconds(30))
+            if (IsLoaded && DateTime.UtcNow - _lastUse > _idleAfter)
             { StopProcess(); StatusChanged?.Invoke("ИИ выгружен после простоя · Т9 активен"); }
         }
         finally { _gate.Release(); }

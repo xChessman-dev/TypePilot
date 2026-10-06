@@ -13,14 +13,14 @@ public partial class App : Application
             _ = SmokeChecks.RunAiAsync(this);
             return;
         }
-        var smoke = e.Args.Contains("--ui-smoke");
+        var smoke = e.Args.Contains("--ui-smoke") || e.Args.Contains("--ui-demo");
         _instance = new Mutex(true, "Local\\TypePilot.SingleInstance", out var first);
         if (!first && !smoke)
         {
             NativeMethods.BroadcastShow();
             Shutdown(); return;
         }
-        var window = new MainWindow(smoke);
+        var window = new MainWindow(smoke, e.Args.Contains("--ui-demo"));
         MainWindow = window;
         window.Show();
     }

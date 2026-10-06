@@ -11,7 +11,7 @@ public sealed class PilotViewModel : INotifyPropertyChanged, IDisposable
     public event Action? SettingsChanged;
     public event Action<string>? ApplyRequested;
     private readonly SettingsStore _store;
-    private readonly AiRuntime _ai = new();
+    private readonly IRewriteRuntime _ai;
     private readonly SynchronizationContext _context;
     private CancellationTokenSource? _rewriteCancellation;
     private string _editor = "", _result = "", _status = "Готов к набору", _aiStatus = "ИИ спит · не занимает видеопамять", _dictionary = "", _allowed = "";
@@ -44,9 +44,10 @@ public sealed class PilotViewModel : INotifyPropertyChanged, IDisposable
     public ActionCommand UnloadCommand { get; }
     public ActionCommand ClearCommand { get; }
     public ActionCommand CopyEditorCommand { get; }
-    public PilotViewModel(string settingsPath, SynchronizationContext? context = null)
+    public PilotViewModel(string settingsPath, SynchronizationContext? context = null, IRewriteRuntime? runtime = null)
     {
         _store = new(settingsPath);
+        _ai = runtime ?? new AiRuntime();
         _context = context ?? SynchronizationContext.Current ?? new SynchronizationContext();
         _ai.StatusChanged += status => _context.Post(_ => AiStatus = status, null);
         RewriteCommand = new(() => _ = RewriteAsync(Editor), () => !Busy && !string.IsNullOrWhiteSpace(Editor) && Editor.Length <= 4000);

@@ -16,6 +16,7 @@ public partial class MainWindow : Window
     private readonly WindowsSpelling _spelling = new();
     private readonly GlobalTyping _global;
     private readonly bool _smoke;
+    private readonly bool _demo;
     private readonly DispatcherTimer _suggestTimer, _resourceTimer;
     private System.Windows.Forms.NotifyIcon? _tray;
     private System.Drawing.Icon? _icon;
@@ -27,9 +28,10 @@ public partial class MainWindow : Window
     private string _word = "";
     private TimeSpan _lastCpu;
     private DateTime _lastSample = DateTime.UtcNow;
-    public MainWindow(bool smoke = false)
+    public MainWindow(bool smoke = false, bool demo = false)
     {
         _smoke = smoke;
+        _demo = demo;
         var settings = smoke ? Path.Combine(AppContext.BaseDirectory, "data", "smoke-settings.json") : Path.Combine(AppContext.BaseDirectory, "data", "settings.json");
         _vm = new(settings, new DispatcherSynchronizationContext(Dispatcher));
         _global = new(_vm.Engine, () => _vm.Settings, Dispatcher);
@@ -46,7 +48,7 @@ public partial class MainWindow : Window
         SpellingStatus.Text = _spelling.Status;
         _vm.SettingsChanged += () => { UpdateIntegration(); _ = _vm.PersistFlagsAsync(); };
         if (!_smoke) { UpdateIntegration(); SetUpTray(); _resourceTimer.Start(); }
-        else await SmokeChecks.RunUiAsync(this, _vm);
+        else await SmokeChecks.RunUiAsync(this, _vm, _demo);
     }
     private void UpdateIntegration() => _global.SetEnabled(_vm.GlobalEnabled);
     private void WindowSourceInitialized(object? sender, EventArgs e)
@@ -84,6 +86,7 @@ public partial class MainWindow : Window
         EditorPage.Visibility = page == "Editor" ? Visibility.Visible : Visibility.Collapsed;
         DictionaryPage.Visibility = page == "Dictionary" ? Visibility.Visible : Visibility.Collapsed;
         SettingsPage.Visibility = page == "Settings" ? Visibility.Visible : Visibility.Collapsed;
+        PageScroll?.ScrollToTop();
     }
     private void StyleChanged(object sender, SelectionChangedEventArgs e)
     { if (_vm is not null && StyleBox is not null) _vm.Style = (RewriteStyle)StyleBox.SelectedIndex; }
@@ -121,6 +124,7 @@ public partial class MainWindow : Window
     }
     private void EditorPreviewKeyDown(object sender, KeyEventArgs e)
     {
+        if (e.Key == Key.Escape) { _suggestTimer.Stop(); _vm.Suggestions.Clear(); SuggestionHint.Text = "Подсказки скрыты · Tab перемещает фокус"; }
         if (e.Key == Key.Z && Keyboard.Modifiers.HasFlag(ModifierKeys.Control)) { _skipBoundary = true; _lastEdit = null; }
         if (e.Key == Key.Back && Keyboard.Modifiers == ModifierKeys.None && _lastEdit is not null && EditorBox.Text == _lastEdit.After && EditorBox.CaretIndex == _lastEdit.Caret)
         { UndoCorrection(this, new()); e.Handled = true; }
@@ -211,7 +215,8 @@ public partial class MainWindow : Window
     internal void SmokeUndo() => UndoCorrection(this, new());
     internal void SmokeShowPage(string page)
     {
-        var button = new RadioButton { Tag = page };
-        Navigate(button, new()); UpdateLayout();
+        var button = page == "Editor" ? EditorNav : page == "Dictionary" ? DictionaryNav : SettingsNav;
+        button.IsChecked = true; Navigate(button, new()); UpdateLayout();
     }
+    internal void SmokeSetStyle(int index) => StyleBox.SelectedIndex = index;
 }

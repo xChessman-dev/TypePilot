@@ -18,3 +18,6 @@ jobs:
       - name: Build and test
         shell: pwsh
         run: ./tools/build.ps1
+      - name: Test desktop editor and render UI
+        shell: pwsh
+        run: ./tools/check-ui.ps1
